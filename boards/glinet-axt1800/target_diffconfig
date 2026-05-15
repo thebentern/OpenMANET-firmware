@@ -1,0 +1,138 @@
+# OpenMANET board config for GL.iNet GL-AXT1800 (Slate AX)
+# SoC: Qualcomm IPQ6018 (qualcommax/ipq60xx), aarch64_cortex-a53
+# RAM: 512 MB DDR3L  |  Flash: 128 MB NAND (tight — trim aggressively)
+# Onboard WiFi: QCN5022 2.4G + QCN5052 5G via ath11k AHB. NO 802.11ah HaLow.
+#
+# Drop this file at:  boards/glinet-axt1800/target_diffconfig  in an
+# OpenMANET/firmware fork (24.10 branch), then run:
+#   ./scripts/openmanet_setup.sh -i -b glinet-axt1800
+#   make download && make -j$(nproc)
+
+# --- Target / device ---------------------------------------------------------
+CONFIG_TARGET_MULTI_PROFILE=y
+CONFIG_TARGET_qualcommax=y
+CONFIG_TARGET_qualcommax_ipq60xx=y
+CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_glinet_gl-axt1800=y
+
+CONFIG_VERSION_MANUFACTURER="GL.iNet"
+CONFIG_VERSION_PRODUCT="GL-AXT1800"
+
+# --- Device-specific packages (from upstream OpenWrt 24.10 image recipe) -----
+CONFIG_PACKAGE_ipq-wifi-glinet_gl-axt1800=y   # Board-specific WiFi BDF/cal
+CONFIG_PACKAGE_kmod-hwmon-pwmfan=y            # Small chassis fan control
+
+# --- Onboard ath11k WiFi (IPQ6018 family, AHB-attached) ----------------------
+# common/openmanet_diffconfig already enables kmod-ath11k=y and kmod-ath11k-pci.
+# AXT-1800 needs the AHB variant for the on-SoC radios, plus IPQ6018 firmware.
+CONFIG_PACKAGE_kmod-ath11k-ahb=y
+CONFIG_PACKAGE_ath11k-firmware-ipq6018=y
+
+# --- Disable ALL Morse Micro / HaLow packages -------------------------------
+# common/openmanet_diffconfig turns these on by default; the AXT-1800 has no
+# Morse hardware, so override back to =n to save NAND and avoid noisy services.
+CONFIG_PACKAGE_kmod-morse=n
+CONFIG_PACKAGE_morsectrl=n
+CONFIG_PACKAGE_morse-bundle=n
+CONFIG_PACKAGE_morse-copy-coredump=n
+CONFIG_PACKAGE_smart_manager=n
+CONFIG_PACKAGE_morse_mesh11sd=n
+CONFIG_PACKAGE_morse-button=n
+CONFIG_PACKAGE_morse-leds=n
+CONFIG_PACKAGE_morse-bcf-info=n
+CONFIG_PACKAGE_morse-fw=n
+CONFIG_PACKAGE_morse-fw-6108=n
+CONFIG_PACKAGE_morse-fw-6108-tlm=n
+CONFIG_PACKAGE_morse-fw-8108=n
+CONFIG_PACKAGE_morse-fw-8108-tlm=n
+CONFIG_PACKAGE_morse-fw-8108-flm=n
+CONFIG_PACKAGE_netifd-morse=n
+CONFIG_PACKAGE_morse-board-config-hotplug-model=n
+CONFIG_PACKAGE_morse-mode=n
+CONFIG_PACKAGE_morse-boot-prints=n
+CONFIG_PACKAGE_morseguide=n
+CONFIG_PACKAGE_virtual-wire=n
+CONFIG_PACKAGE_kmod-trelay=n
+CONFIG_PACKAGE_luci-app-morseconfig=n
+CONFIG_PACKAGE_luci-theme-morseargon=n
+
+# Morse-specific hostapd/wpa_supplicant S1G build flags — turn off
+# CONFIG_MORSE_HOSTAPD_S1G_EAP, _ACS and CONFIG_MORSE_WPA_SUPPLICANT_S1G_*
+# are set in the common diffconfig. They're effectively no-ops without the
+# Morse driver, but turn them off for cleanliness.
+# CONFIG_MORSE_HOSTAPD_S1G_EAP is not set
+# CONFIG_MORSE_HOSTAPD_S1G_ACS is not set
+# CONFIG_MORSE_WPA_SUPPLICANT_S1G_MESH_NETWORKING is not set
+# CONFIG_MORSE_WPA_SUPPLICANT_S1G_EAP is not set
+
+# Other Morse-adjacent BSPs
+CONFIG_PACKAGE_bsp-halowlink2=n
+CONFIG_PACKAGE_bsp-ht-hd01-v2=n
+CONFIG_PACKAGE_ht-service=n
+CONFIG_PACKAGE_ftdi-usb-spi=n
+CONFIG_PACKAGE_kmod-ftdi-usb-spi=n
+
+# --- Drop WiFi firmware/drivers that don't apply to this hardware -----------
+# common/openmanet_diffconfig enables a kitchen sink of WiFi drivers. The
+# AXT-1800 only needs ath11k (AHB). Save ~5-10 MB of NAND.
+CONFIG_PACKAGE_kmod-iwlwifi=n
+CONFIG_PACKAGE_iwlwifi-firmware-ax200=n
+CONFIG_PACKAGE_iwlwifi-firmware-ax210=n
+CONFIG_PACKAGE_kmod-owl-loader=n
+CONFIG_PACKAGE_ath11k-firmware-wcn6855=n
+CONFIG_PACKAGE_kmod-ath11k-pci=n
+CONFIG_PACKAGE_ath10k-firmware-qca6174=n
+CONFIG_PACKAGE_kmod-ath10k=n
+CONFIG_PACKAGE_kmod-ath9k=n
+CONFIG_PACKAGE_kmod-ath9k-htc=n
+CONFIG_PACKAGE_ath9k-htc-firmware=n
+CONFIG_PACKAGE_kmod-mt76=n
+CONFIG_PACKAGE_kmod-mt7915-firmware=n
+CONFIG_PACKAGE_kmod-mt7916-firmware=n
+CONFIG_PACKAGE_kmod-mt7915e=n
+CONFIG_PACKAGE_kmod-rt2800-lib=n
+CONFIG_PACKAGE_kmod-rt2800-usb=n
+CONFIG_PACKAGE_kmod-rt2x00-lib=n
+
+# --- Mesh data plane: 802.11s on ath11k (5 GHz preferred) -------------------
+# common/openmanet_diffconfig already sets MAC80211_MESH=y, batman-adv, batctl,
+# wpad-openssl, ip-full, ethtool, iw-full. Nothing to add for the basics.
+# If you want ONLY 802.11s and no batman-adv to save space, override:
+# CONFIG_PACKAGE_kmod-batman-adv=n
+# CONFIG_PACKAGE_batctl-full=n
+# CONFIG_PACKAGE_luci-proto-batman-adv=n
+
+# --- NAND trimming: drop heavyweight extras ----------------------------------
+# 128 MB NAND is the dominant constraint. Build once with the lines below
+# commented out and check image size — re-enable only what fits.
+CONFIG_PACKAGE_wireshark=n
+# tailscale alone is ~30 MB
+CONFIG_PACKAGE_tailscale=n
+CONFIG_PACKAGE_mediamtx=n
+CONFIG_PACKAGE_adsbtocot=n
+CONFIG_PACKAGE_dump1090=n
+CONFIG_PACKAGE_rtl-sdr=n
+
+# USB audio stack — only keep if you have audio plans for the AXT-1800
+CONFIG_PACKAGE_kmod-usb-audio=n
+CONFIG_PACKAGE_alsa-lib=n
+CONFIG_PACKAGE_alsa-utils=n
+CONFIG_PACKAGE_libopus=n
+CONFIG_PACKAGE_portaudio=n
+CONFIG_PACKAGE_kmod-input-gpio-encoder=n
+
+# GPS — keep if you'll plug a USB GPS in; drop to save space otherwise
+# CONFIG_PACKAGE_gpsd=n
+# CONFIG_PACKAGE_gpsd-clients=n
+
+# --- Keep ATAK / OpenMANET userspace ----------------------------------------
+# These come from common/openmanet_diffconfig and are the actual reason to use
+# OpenMANET on this device. Listed for visibility — not overridden here.
+#   CONFIG_PACKAGE_openmanetd=y
+#   CONFIG_PACKAGE_alfred=y
+#   CONFIG_PACKAGE_ALFRED_GPSD=y
+#   CONFIG_PACKAGE_ALFRED_BATHOSTS=y
+#   CONFIG_PACKAGE_dpp-handler=y
+#   CONFIG_PACKAGE_vxlan=y
+#   CONFIG_PACKAGE_relayd=y
+#   CONFIG_PACKAGE_luci-app-ekhwizards=y
+#   CONFIG_PACKAGE_luci-theme-openmanetargon=y
