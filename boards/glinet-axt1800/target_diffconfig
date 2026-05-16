@@ -105,8 +105,6 @@ CONFIG_PACKAGE_kmod-rt2x00-lib=n
 # 128 MB NAND is the dominant constraint. Build once with the lines below
 # commented out and check image size — re-enable only what fits.
 CONFIG_PACKAGE_wireshark=n
-# tailscale alone is ~30 MB
-CONFIG_PACKAGE_tailscale=n
 CONFIG_PACKAGE_mediamtx=n
 CONFIG_PACKAGE_adsbtocot=n
 CONFIG_PACKAGE_dump1090=n
@@ -132,12 +130,24 @@ CONFIG_PACKAGE_luci-lua-runtime=y
 CONFIG_PACKAGE_luci-compat=y
 
 # --- LuCI theme ------------------------------------------------------------
-# OpenMANET's preferred themes (openmanetargon, morseargon) both DEPEND on
-# morse-mode, which transitively pulls in netifd-morse + morse-regdb — the
-# entire HaLow stack. Useless on this board (no Morse radio). Add upstream
-# bootstrap instead — it's what LuCI's default mediaurlbase points to, so
-# no uci tweaking needed post-flash.
+# Two themes installed:
+# - luci-theme-bootstrap: LuCI default, matches the default mediaurlbase so
+#   the UI works out of the box on first flash.
+# - luci-theme-openmanetargon: OpenMANET-branded theme. Audited safe — its
+#   header template (luasrc/view/themes/openmanetargon/header.htm) calls
+#   util.ubus("morse-mode","query") but nil-checks every Morse reading.
+#   With no Morse hw the morse-mode widgets just don't render. The package
+#   normally declares LUCI_DEPENDS:=+morse-mode; a board patch under
+#   patches/glinet-axt1800/ drops that dep so it builds for us.
+# To activate the OpenMANET theme post-flash:
+#   uci set luci.main.mediaurlbase='/luci-static/openmanetargon'
+#   uci commit luci
+# Not enabling luci-mod-home / luci-app-ekhwizards / luci-app-morseconfig —
+# they hard-require Morse JS modules at view load (require tools.morse.*,
+# custom-elements.morse-config-diagram). Without Morse the views just fail
+# to render. Stay on standard LuCI admin pages.
 CONFIG_PACKAGE_luci-theme-bootstrap=y
+CONFIG_PACKAGE_luci-theme-openmanetargon=y
 
 # --- Keep ATAK / OpenMANET userspace ----------------------------------------
 # These come from common/openmanet_diffconfig and are the actual reason to use

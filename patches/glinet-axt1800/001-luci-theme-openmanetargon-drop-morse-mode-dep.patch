@@ -1,0 +1,19 @@
+Drop the +morse-mode LuCI dep from the openmanetargon theme.
+
+The theme template (luasrc/view/themes/openmanetargon/header.htm) calls
+util.ubus("morse-mode", "query") but nil-checks the result on every read,
+so on a non-Morse build the morse-mode widgets just don't render. The
+package-level dep on morse-mode is what makes the theme unbuildable here
+(morse-mode transitively pulls in netifd-morse + morse-regdb, both
+disabled in our diffconfig). Dropping the dep so it builds.
+
+--- a/feeds/openmanet/luci/luci-theme-openmanetargon/Makefile
++++ b/feeds/openmanet/luci/luci-theme-openmanetargon/Makefile
+@@ -1,7 +1,6 @@
+ include $(TOPDIR)/rules.mk
+
+ LUCI_TITLE:=LuCI OpenMANET Argon Theme
+-LUCI_DEPENDS:=+morse-mode
+
+ PKG_LICENSE:=Apache-2.0
+
