@@ -1,0 +1,45 @@
+#!/bin/sh
+#
+# AXT-1800 first-boot defaults for OpenMANET.
+# Runs once on fresh install (factory.ubi or sysupgrade -n), then is
+# removed by /etc/init.d/done.
+#
+# What this fixes:
+# 1. LuCI's mediaurlbase defaults to /luci-static/bootstrap, but
+#    luci-theme-bootstrap on this build only ships static assets, not
+#    Lua templates. Browsing to /cgi-bin/luci/ 500s with 'Failed to
+#    load template themes/bootstrap/header'. Point at openmanetargon
+#    (which DOES ship Lua templates) instead.
+#
+# 2. Adding a 'B.A.T.M.A.N. Advanced' interface from LuCI's Network
+#    page can leave network.<name>.proto unset (LuCI proto-batman-adv
+#    UI quirk on certain navigation flows), which then renders as
+#    'Unsupported protocol type' until the user uci-sets proto=batadv
+#    manually. Pre-create bat0 with the right proto so users can just
+#    attach a wireless mesh hardif to it without first hitting the bug.
+
+. /lib/functions.sh
+
+board=$(board_name)
+[ "$board" = "glinet,gl-axt1800" ] || exit 0
+
+# --- LuCI theme ---
+uci -q batch <<EOF >/dev/null
+set luci.main.mediaurlbase='/luci-static/openmanetargon'
+commit luci
+EOF
+
+# --- batman-adv mesh device ---
+# Only create bat0 if no existing batadv interface is configured. Don't
+# clobber user customization (this script can re-run if /etc/init.d/done
+# didn't get to remove it).
+if ! uci -q show network | grep -q "proto='batadv'"; then
+	uci -q batch <<EOF >/dev/null
+set network.bat0=interface
+set network.bat0.proto='batadv'
+set network.bat0.multicast_mode='0'
+commit network
+EOF
+fi
+
+exit 0
