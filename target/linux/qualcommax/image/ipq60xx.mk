@@ -52,3 +52,16 @@ define Device/yuncore_fap650
 endef
 TARGET_DEVICES += yuncore_fap650
 
+define Device/glinet_gl-axt1800
+	$(call Device/FitImage)
+	$(call Device/UbiFit)
+	DEVICE_VENDOR := GL.iNet
+	DEVICE_MODEL := GL-AXT1800
+	BLOCKSIZE := 128k
+	PAGESIZE := 2048
+	DEVICE_DTS_CONFIG := config@cp03-c1
+	SOC := ipq6018
+	DEVICE_PACKAGES := ipq-wifi-glinet_gl-axt1800 kmod-hwmon-pwmfan
+	SUPPORTED_DEVICES += glinet,axt1800
+endef
+TARGET_DEVICES += glinet_gl-axt1800
