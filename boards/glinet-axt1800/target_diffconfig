@@ -131,6 +131,14 @@ CONFIG_PACKAGE_kmod-input-gpio-encoder=n
 CONFIG_PACKAGE_luci-lua-runtime=y
 CONFIG_PACKAGE_luci-compat=y
 
+# --- LuCI theme ------------------------------------------------------------
+# OpenMANET's preferred themes (openmanetargon, morseargon) both DEPEND on
+# morse-mode, which transitively pulls in netifd-morse + morse-regdb — the
+# entire HaLow stack. Useless on this board (no Morse radio). Add upstream
+# bootstrap instead — it's what LuCI's default mediaurlbase points to, so
+# no uci tweaking needed post-flash.
+CONFIG_PACKAGE_luci-theme-bootstrap=y
+
 # --- Keep ATAK / OpenMANET userspace ----------------------------------------
 # These come from common/openmanet_diffconfig and are the actual reason to use
 # OpenMANET on this device. Listed for visibility — not overridden here.
