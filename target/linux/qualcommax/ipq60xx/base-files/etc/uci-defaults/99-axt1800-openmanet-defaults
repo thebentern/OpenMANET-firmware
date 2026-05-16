@@ -4,19 +4,24 @@
 # Runs once on fresh install (factory.ubi or sysupgrade -n), then is
 # removed by /etc/init.d/done.
 #
-# What this fixes:
-# 1. LuCI's mediaurlbase defaults to /luci-static/bootstrap, but
-#    luci-theme-bootstrap on this build only ships static assets, not
-#    Lua templates. Browsing to /cgi-bin/luci/ 500s with 'Failed to
-#    load template themes/bootstrap/header'. Point at openmanetargon
-#    (which DOES ship Lua templates) instead.
+# What this gives the user out of the box:
+#   - LuCI rendered with the OpenMANET argon theme (the bootstrap
+#     theme on this build ships static assets only, no Lua templates,
+#     so leaving mediaurlbase at its default 500s the entire UI).
+#   - network.bat0 with proto=batadv ready for batman-adv mesh routing.
+#   - 802.11s mesh wifi-iface on the 5 GHz radio (mesh_id
+#     'openmanet-mesh', channel 36, no encryption).
+#   - batadv_hardif binding the wireless to bat0.
+#   - Default AP that auto-detect dropped on the 5 GHz radio is
+#     disabled so we don't spew an unconfigured "OpenWrt" SSID.
 #
-# 2. Adding a 'B.A.T.M.A.N. Advanced' interface from LuCI's Network
-#    page can leave network.<name>.proto unset (LuCI proto-batman-adv
-#    UI quirk on certain navigation flows), rendering as 'Unsupported
-#    protocol type' until the user uci-sets proto=batadv manually.
-#    Pre-create bat0 with the right proto so users can just attach a
-#    wireless mesh hardif to it without first hitting the bug.
+# What it deliberately doesn't touch:
+#   - bat0 has no IP. batman-adv works at L2; add an IP if you want
+#     L3 reachability across mesh peers.
+#   - Country code stays at '00' (worldwide reg). Set 'option country'
+#     on the radio to unlock full TX power for your region.
+#   - Encryption stays 'none'. Set 'option encryption sae' + a key
+#     for production deployments.
 
 . /lib/functions.sh
 
@@ -28,13 +33,52 @@ uci -q set luci.main.mediaurlbase='/luci-static/openmanetargon'
 uci -q commit luci
 
 # --- batman-adv mesh device ---
-# Only create bat0 if no existing batadv interface is configured. Don't
-# clobber user customization (this script can re-run if /etc/init.d/done
-# didn't get to remove it).
 if ! uci -q show network | grep -q "proto='batadv'"; then
 	uci -q set network.bat0=interface
 	uci -q set network.bat0.proto=batadv
 	uci -q set network.bat0.multicast_mode='0'
+	uci -q commit network
+fi
+
+# --- 802.11s wifi-iface on the 5 GHz radio, batadv_hardif to bat0 ---
+# By the time uci-defaults runs, /etc/init.d/wifi has already produced
+# /etc/config/wireless from board detection. Find the 5 GHz radio by
+# band (radio ordering varies across boards), so this script is
+# resilient to a future driver/DTS reshuffle.
+mesh_radio=
+for radio in $(uci -q show wireless | sed -n "s/^wireless\.\([^=]\+\)=wifi-device$/\1/p"); do
+	if [ "$(uci -q get wireless.${radio}.band)" = "5g" ]; then
+		mesh_radio=$radio
+		break
+	fi
+done
+
+if [ -n "$mesh_radio" ] && ! uci -q show wireless | grep -q "mode='mesh'"; then
+	# Bring the 5 GHz radio up at channel 36 (DFS-free almost everywhere)
+	uci -q set wireless.${mesh_radio}.disabled='0'
+	uci -q set wireless.${mesh_radio}.channel='36'
+
+	# Silence the default AP on this radio (auto-detect always adds one)
+	for sec in $(uci -q show wireless | sed -n "s/^wireless\.\(default_${mesh_radio}\)=wifi-iface$/\1/p"); do
+		uci -q set wireless.${sec}.disabled='1'
+	done
+
+	# 802.11s mesh wifi-iface
+	uci -q set wireless.mesh0=wifi-iface
+	uci -q set wireless.mesh0.device="${mesh_radio}"
+	uci -q set wireless.mesh0.mode='mesh'
+	uci -q set wireless.mesh0.mesh_id='openmanet-mesh'
+	uci -q set wireless.mesh0.mesh_fwding='1'
+	uci -q set wireless.mesh0.encryption='none'
+	uci -q set wireless.mesh0.network='mesh_hardif'
+	uci -q commit wireless
+fi
+
+# --- batadv_hardif binding the wireless mesh to bat0 ---
+if ! uci -q show network | grep -q "proto='batadv_hardif'"; then
+	uci -q set network.mesh_hardif=interface
+	uci -q set network.mesh_hardif.proto='batadv_hardif'
+	uci -q set network.mesh_hardif.master='bat0'
 	uci -q commit network
 fi
 
