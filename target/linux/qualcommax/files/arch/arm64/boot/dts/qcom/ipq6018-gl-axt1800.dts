@@ -22,77 +22,15 @@
 		regulator-always-on;
 	};
 
-	vcc_fan: regulator-vcc-fan {
-		compatible = "regulator-fixed";
-		regulator-name = "vcc_fan";
-		regulator-min-microvolt = <5000000>;
-		regulator-max-microvolt = <5000000>;
-		gpios = <&tlmm 29 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
-		regulator-boot-on;
-	};
-
-	fan: pwm-fan {
-		compatible = "pwm-fan";
-		pwms = <&pwm 1 40000 0>;
-		fan-supply = <&vcc_fan>;
-		interrupt-parent = <&tlmm>;
-		interrupts = <31 IRQ_TYPE_EDGE_RISING>;
-		cooling-levels = <36 128 192 255>;
-		#cooling-cells = <2>;
-	};
-
-	thermal-zones {
-		cpu-thermal {
-			trips {
-				cpu_trip_high: active-high {
-					temperature = <100000>;
-					hysteresis = <2000>;
-					type = "active";
-				};
-
-				cpu_trip_med: active-med {
-					temperature = <75000>;
-					hysteresis = <2000>;
-					type = "active";
-				};
-
-				cpu_trip_low: active-low {
-					temperature = <50000>;
-					hysteresis = <2000>;
-					type = "active";
-				};
-			};
-
-			cooling-maps {
-				cpu-active-high {
-					cooling-device = <&fan 3 3>;
-					trip = <&cpu_trip_high>;
-				};
-
-				cpu-active-med {
-					cooling-device = <&fan 2 2>;
-					trip = <&cpu_trip_med>;
-				};
-
-				cpu-active-low {
-					cooling-device = <&fan 1 1>;
-					trip = <&cpu_trip_low>;
-				};
-			};
-		};
-	};
+	/*
+	 * OpenMANET's 6.6 kernel base lacks the IPQ6018 PWM controller node.
+	 * Upstream main's pwm-fan + thermal-zones omitted here — fan will run
+	 * at unmanaged speed. Backporting the PWM patch from upstream main's
+	 * patches-6.12/ is a follow-up.
+	 */
 };
 
 &tlmm {
-	pwm_pins: pwm-pins {
-		pwm {
-			pins = "gpio30";
-			function = "pwm13";
-			drive-strength = <8>;
-		};
-	};
-
 	sd_pins: sd-pins {
 		sd {
 			pins = "gpio62";
@@ -119,13 +57,7 @@
 	};
 };
 
-&pwm {
-	pinctrl-0 = <&pwm_pins>;
-	pinctrl-names = "default";
-	status = "okay";
-};
-
-&sdhc {
+&sdhc_1 {
 	mmc-ddr-1_8v;
 	bus-width = <4>;
 	cd-gpios = <&tlmm 62 GPIO_ACTIVE_LOW>;
