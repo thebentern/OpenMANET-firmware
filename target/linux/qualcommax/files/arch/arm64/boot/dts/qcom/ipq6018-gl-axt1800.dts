@@ -2,7 +2,7 @@
 
 /dts-v1/;
 
-#include "ipq6000-glinet.dtsi"
+#include "ipq6018-glinet.dtsi"
 
 / {
 	model = "GL.iNet GL-AXT1800";
