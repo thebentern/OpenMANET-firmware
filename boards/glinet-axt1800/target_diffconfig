@@ -124,6 +124,13 @@ CONFIG_PACKAGE_kmod-input-gpio-encoder=n
 # CONFIG_PACKAGE_gpsd=n
 # CONFIG_PACKAGE_gpsd-clients=n
 
+# --- LuCI Lua runtime ------------------------------------------------------
+# OpenMANET's common config enables luci-mod-admin-full (Lua-based) but
+# doesn't pull in the Lua runtime, so the legacy admin pages 500 with
+# "Unable to load Lua runtime" on first boot. Add them here.
+CONFIG_PACKAGE_luci-lua-runtime=y
+CONFIG_PACKAGE_luci-compat=y
+
 # --- Keep ATAK / OpenMANET userspace ----------------------------------------
 # These come from common/openmanet_diffconfig and are the actual reason to use
 # OpenMANET on this device. Listed for visibility — not overridden here.
