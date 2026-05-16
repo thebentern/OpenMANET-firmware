@@ -59,6 +59,13 @@ define Device/glinet_gl-axt1800
 	DEVICE_MODEL := GL-AXT1800
 	BLOCKSIZE := 128k
 	PAGESIZE := 2048
+	# Hard cap so the build fails loud if the squashfs+kernel can't fit
+	# in a comfortable rootfs UBI volume. Discovered the hard way: sysupgrade
+	# silently fails to grow the rootfs UBI volume when rootfs_data already
+	# spans all free LEBs, leaving the device booting from the old rootfs.
+	# Cap of ~45 MB leaves enough room in the 119 MB rootfs partition for
+	# a 7 MB kernel + 45 MB rootfs + ~65 MB rootfs_data after factory write.
+	IMAGE_SIZE := 46080k
 	DEVICE_DTS_CONFIG := config@cp03-c1
 	SOC := ipq6018
 	DEVICE_PACKAGES := ipq-wifi-glinet_gl-axt1800 kmod-hwmon-pwmfan
