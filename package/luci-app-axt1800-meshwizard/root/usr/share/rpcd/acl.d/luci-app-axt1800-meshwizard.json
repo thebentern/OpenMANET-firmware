@@ -1,0 +1,11 @@
+{
+	"luci-app-axt1800-meshwizard": {
+		"description": "Grant access to the AXT-1800 mesh wizard",
+		"read": {
+			"uci": [ "network", "wireless", "system" ]
+		},
+		"write": {
+			"uci": [ "network", "wireless", "system" ]
+		}
+	}
+}
