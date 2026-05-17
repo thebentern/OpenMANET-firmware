@@ -37,17 +37,20 @@ const COUNTRIES = [
 ];
 
 const CHANNELS_5G = ['36','40','44','48','149','153','157','161','165'];
+const CHANNELS_2G = ['1','6','11'];
 
 // --- Handle POST submission ---
 let posted = http.getenv('REQUEST_METHOD') == 'POST';
 let msg = null;
 
 if (posted) {
-	let mesh_id    = http.formvalue('mesh_id')    || 'openmanet-mesh';
-	let channel    = http.formvalue('channel')    || '36';
-	let encryption = http.formvalue('encryption') || 'none';
-	let key        = http.formvalue('key')        || '';
-	let country    = http.formvalue('country')    || '00';
+	let mesh_id        = http.formvalue('mesh_id')        || 'openmanet-mesh';
+	let channel        = http.formvalue('channel')        || '36';
+	let encryption     = http.formvalue('encryption')     || 'none';
+	let key            = http.formvalue('key')            || '';
+	let country        = http.formvalue('country')        || '00';
+	let mesh_2g_enable = http.formvalue('mesh_2g_enable') == '1';
+	let channel_2g     = http.formvalue('channel_2g')     || '6';
 
 	if (!radio_5g) {
 		msg = 'No 5 GHz wifi-device found in /etc/config/wireless — cannot configure mesh.';
@@ -107,6 +110,49 @@ if (posted) {
 			uci.set('wireless', radio_2g, 'country', country);
 		}
 
+		// --- Optional: 2.4 GHz mesh on the second radio --------------
+		// Creates a parallel mesh interface (wireless.mesh1) on the
+		// 2.4 GHz radio with the SAME mesh_id + encryption as the 5 GHz
+		// side, but a different channel. Both wifi-ifaces are bound to
+		// bat0 via batadv_hardif, so batman-adv bridges traffic between
+		// bands at L2 — a peer joining on either band sees every other
+		// peer regardless of which band that peer is on.
+		//
+		// Coexists with the 2.4 GHz mgmt AP: ath11k supports AP + mesh
+		// VAPs on the same radio, sharing the channel. Setting
+		// channel_2g here also moves the mgmt AP to that channel
+		// (single radio = single channel constraint).
+		if (radio_2g && mesh_2g_enable) {
+			uci.set('wireless', radio_2g, 'disabled', '0');
+			uci.set('wireless', radio_2g, 'channel',  channel_2g);
+
+			if (!uci.get('wireless', 'mesh1'))
+				uci.set('wireless', 'mesh1', 'wifi-iface');
+			uci.set('wireless', 'mesh1', 'device',     radio_2g);
+			uci.set('wireless', 'mesh1', 'network',    'mesh_2g');
+			uci.set('wireless', 'mesh1', 'mode',       'mesh');
+			uci.set('wireless', 'mesh1', 'disabled',   '0');
+			uci.set('wireless', 'mesh1', 'mesh_id',    mesh_id);
+			uci.set('wireless', 'mesh1', 'encryption', encryption);
+			if (encryption == 'sae' && length(key) >= 8)
+				uci.set('wireless', 'mesh1', 'key', key);
+			else
+				uci.delete('wireless', 'mesh1', 'key');
+
+			if (!uci.get('network', 'mesh_2g'))
+				uci.set('network', 'mesh_2g', 'interface');
+			uci.set('network', 'mesh_2g', 'proto',  'batadv_hardif');
+			uci.set('network', 'mesh_2g', 'master', 'bat0');
+		} else if (radio_2g) {
+			// 2.4 GHz mesh opt-out: tear down mesh1 cleanly. mgmt AP on
+			// radio_2g (wireless.mgmt_ap, laid down by uci-defaults)
+			// stays untouched.
+			if (uci.get('wireless', 'mesh1'))
+				uci.set('wireless', 'mesh1', 'disabled', '1');
+			if (uci.get('network', 'mesh_2g'))
+				uci.delete('network', 'mesh_2g');
+		}
+
 		// --- bat0 L3 (optional) — assign a static IP to the mesh ------
 		// network.bat0 owns proto=batadv (creates the bat0 netdev). To put
 		// L3 on top, we use a SECOND interface section that targets bat0
@@ -159,6 +205,11 @@ const cur_channel     = (radio_5g && uci.get('wireless', radio_5g, 'channel')) |
 const cur_country     = (radio_5g && uci.get('wireless', radio_5g, 'country')) || '00';
 const cur_bat_ip      = uci.get('network', 'bat0_ip', 'ipaddr')     || '';
 const cur_bat_netmask = uci.get('network', 'bat0_ip', 'netmask')    || '255.255.0.0';
+// 2.4 GHz mesh state: present + not explicitly disabled
+const cur_mesh_2g_enable =
+	uci.get('wireless', 'mesh1') &&
+	uci.get('wireless', 'mesh1', 'disabled') != '1';
+const cur_channel_2g  = (radio_2g && uci.get('wireless', radio_2g, 'channel')) || '6';
 
 include('header');
 %}
@@ -205,6 +256,28 @@ include('header');
 			<label><b>{{ _('Passphrase (if SAE)') }}</b></label><br>
 			<input type="password" name="key" value="{{ cur_key }}" minlength="8" maxlength="63" style="width:100%;padding:6px;">
 			<small>{{ _('8–63 characters. Must match on all peers.') }}</small>
+		</p>
+	</fieldset>
+
+	<fieldset>
+		<legend>{{ _('Optional: 2.4 GHz mesh radio') }}</legend>
+
+		<p>
+			<label>
+				<input type="checkbox" name="mesh_2g_enable" value="1"{{ cur_mesh_2g_enable ? ' checked' : '' }}>
+				<b>{{ _('Also bring up the 2.4 GHz radio as a mesh point') }}</b>
+			</label><br>
+			<small>{{ _('When enabled, the 2.4 GHz radio joins the same mesh (same ID + encryption as 5 GHz) on the channel below. batman-adv bridges traffic between bands, so peers on either band see each other. Slower than 5 GHz, but better range and wall penetration. The 2.4 GHz management AP keeps working on the same channel.') }}</small>
+		</p>
+
+		<p>
+			<label><b>{{ _('2.4 GHz Channel') }}</b></label><br>
+			<select name="channel_2g" style="width:100%;padding:6px;">
+			{% for (ch in CHANNELS_2G): %}
+				<option value="{{ ch }}"{{ ch == cur_channel_2g ? ' selected' : '' }}>{{ ch }}</option>
+			{% endfor %}
+			</select>
+			<small>{{ _('Channels 1, 6, and 11 are non-overlapping in most regions. The 2.4 GHz management AP runs on this same channel (single-radio, single-channel constraint).') }}</small>
 		</p>
 	</fieldset>
 
