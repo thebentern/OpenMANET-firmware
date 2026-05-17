@@ -39,6 +39,13 @@ const COUNTRIES = [
 const CHANNELS_5G = ['36','40','44','48','149','153','157','161','165'];
 const CHANNELS_2G = ['1','6','11'];
 
+// Channel widths. Default (HE80 on 5 GHz, HE20 on 2.4 GHz) matches what
+// ath11k auto-picks, which is great for throughput but mediocre for
+// MANET range/resilience. Operators who want longer reach typically
+// drop to HE20 or HE40.
+const HTMODES_5G = ['HE20','HE40','HE80','HE160'];
+const HTMODES_2G = ['HE20','HE40'];
+
 // --- Handle POST submission ---
 let posted = http.getenv('REQUEST_METHOD') == 'POST';
 let msg = null;
@@ -51,6 +58,8 @@ if (posted) {
 	let country        = http.formvalue('country')        || '00';
 	let mesh_2g_enable = http.formvalue('mesh_2g_enable') == '1';
 	let channel_2g     = http.formvalue('channel_2g')     || '6';
+	let htmode_5g      = http.formvalue('htmode_5g')      || 'HE80';
+	let htmode_2g      = http.formvalue('htmode_2g')      || 'HE20';
 
 	if (!radio_5g) {
 		msg = 'No 5 GHz wifi-device found in /etc/config/wireless — cannot configure mesh.';
@@ -106,8 +115,10 @@ if (posted) {
 		uci.set('wireless', radio_5g, 'disabled', '0');
 		uci.set('wireless', radio_5g, 'channel',  channel);
 		uci.set('wireless', radio_5g, 'country',  country);
+		uci.set('wireless', radio_5g, 'htmode',   htmode_5g);
 		if (radio_2g) {
 			uci.set('wireless', radio_2g, 'country', country);
+			uci.set('wireless', radio_2g, 'htmode',  htmode_2g);
 		}
 
 		// --- Optional: 2.4 GHz mesh on the second radio --------------
@@ -210,6 +221,8 @@ const cur_mesh_2g_enable =
 	uci.get('wireless', 'mesh1') &&
 	uci.get('wireless', 'mesh1', 'disabled') != '1';
 const cur_channel_2g  = (radio_2g && uci.get('wireless', radio_2g, 'channel')) || '6';
+const cur_htmode_5g   = (radio_5g && uci.get('wireless', radio_5g, 'htmode'))  || 'HE80';
+const cur_htmode_2g   = (radio_2g && uci.get('wireless', radio_2g, 'htmode'))  || 'HE20';
 
 include('header');
 %}
@@ -242,6 +255,16 @@ include('header');
 			{% endfor %}
 			</select>
 			<small>{{ _('Non-DFS channels are 36/40/44/48 and 149-165 — no radar-wait on bring-up.') }}</small>
+		</p>
+
+		<p>
+			<label><b>{{ _('5 GHz Channel Width') }}</b></label><br>
+			<select name="htmode_5g" style="width:100%;padding:6px;">
+			{% for (m in HTMODES_5G): %}
+				<option value="{{ m }}"{{ m == cur_htmode_5g ? ' selected' : '' }}>{{ m }}</option>
+			{% endfor %}
+			</select>
+			<small>{{ _('HE20=20MHz, HE40=40MHz, HE80=80MHz, HE160=160MHz. Wider = more throughput but shorter range and harder to fit in crowded RF. HE20 or HE40 is recommended for outdoor MANET range; HE80 is the ath11k default and best for indoor / dense mesh. HE80 requires consecutive channels (ch 36 / 52 / 100 / 116 / 132 / 149 are valid primaries; 161 and 165 do not work at HE80).') }}</small>
 		</p>
 
 		<p>
@@ -278,6 +301,16 @@ include('header');
 			{% endfor %}
 			</select>
 			<small>{{ _('Channels 1, 6, and 11 are non-overlapping in most regions. The 2.4 GHz management AP runs on this same channel (single-radio, single-channel constraint).') }}</small>
+		</p>
+
+		<p>
+			<label><b>{{ _('2.4 GHz Channel Width') }}</b></label><br>
+			<select name="htmode_2g" style="width:100%;padding:6px;">
+			{% for (m in HTMODES_2G): %}
+				<option value="{{ m }}"{{ m == cur_htmode_2g ? ' selected' : '' }}>{{ m }}</option>
+			{% endfor %}
+			</select>
+			<small>{{ _('HE20=20MHz, HE40=40MHz. HE20 is strongly recommended in 2.4 GHz — HE40 overlaps with 5 of the 11 channels and is unfriendly in any populated environment. Applies to both mesh and mgmt-AP on this radio.') }}</small>
 		</p>
 	</fieldset>
 
