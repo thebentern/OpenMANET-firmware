@@ -154,7 +154,11 @@ CONFIG_PACKAGE_luci-theme-openmanetargon=y
 # luci-app-morseapwizard) which are unbuildable on this board (Morse-tied).
 # Single-page LuCI form under Network → Mesh Wizard. Edits mesh_id, channel,
 # encryption, country, and optional AP side. Lives in package/.
-CONFIG_PACKAGE_luci-app-axt1800-meshwizard=y
+# =m: build the .ipk but DON'T install it into the factory image.
+# After flashing factory.ubi (which boots reliably without the wizard files),
+# opkg-install the .ipk at runtime — files land in /overlay/ rather than
+# the squashfs that the AXT-1800 boot path is fussy about.
+CONFIG_PACKAGE_luci-app-axt1800-meshwizard=m
 
 # --- Keep ATAK / OpenMANET userspace ----------------------------------------
 # These come from common/openmanet_diffconfig and are the actual reason to use

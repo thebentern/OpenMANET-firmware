@@ -1,0 +1,96 @@
+#!/bin/sh
+#
+# openmanet-sdcard-upgrade — apply a sysupgrade.bin from microSD.
+#
+# Usage:
+#   openmanet-sdcard-upgrade [-c]    apply newest *sysupgrade.bin on SD
+#   openmanet-sdcard-upgrade -h      help
+#
+# Flags:
+#   -c  keep current config (sysupgrade default). Without it, runs `-n`
+#       (factory-style reset). For OpenMANET → OpenMANET upgrades on the
+#       same major version, you usually want -c. For cross-version or
+#       sketchy upgrades, leave it off so config is wiped cleanly.
+#
+
+set -eu
+
+KEEP_CONFIG=0
+while getopts "ch" opt; do
+	case "$opt" in
+		c) KEEP_CONFIG=1 ;;
+		h) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		*) echo "usage: $0 [-c]" >&2; exit 2 ;;
+	esac
+done
+
+# Find a block device that looks like the SD card.
+CARD_DEV=
+for d in /dev/mmcblk0p1 /dev/mmcblk0 /dev/sda1 /dev/sda; do
+	[ -b "$d" ] || continue
+	CARD_DEV="$d"
+	break
+done
+
+if [ -z "$CARD_DEV" ]; then
+	echo "No microSD (or USB) block device found." >&2
+	echo "Devices considered: /dev/mmcblk0[p1], /dev/sda[1]" >&2
+	exit 1
+fi
+
+MOUNT=/tmp/sdcard-upgrade
+mkdir -p "$MOUNT"
+# Try common filesystem types
+mounted=0
+for fs in vfat exfat ext4 auto; do
+	if mount -t "$fs" -o ro "$CARD_DEV" "$MOUNT" 2>/dev/null; then
+		mounted=1
+		break
+	fi
+done
+
+if [ "$mounted" = 0 ]; then
+	echo "Failed to mount $CARD_DEV. Card format must be vfat/exfat/ext4." >&2
+	rmdir "$MOUNT"
+	exit 1
+fi
+
+trap 'umount "$MOUNT" 2>/dev/null; rmdir "$MOUNT" 2>/dev/null' EXIT
+
+# Find the newest *sysupgrade.bin. Prefer one whose filename matches this
+# device, but fall back to any sysupgrade.bin.
+BOARD="$(cat /tmp/sysinfo/board_name 2>/dev/null || echo unknown)"
+DEVID="${BOARD#*,}"   # 'glinet,gl-axt1800' -> 'gl-axt1800'
+
+IMG=$(ls -t "$MOUNT"/*"$DEVID"*sysupgrade.bin 2>/dev/null | head -1)
+[ -z "$IMG" ] && IMG=$(ls -t "$MOUNT"/*sysupgrade.bin 2>/dev/null | head -1)
+
+if [ -z "$IMG" ]; then
+	echo "No *sysupgrade.bin found on the SD card root." >&2
+	exit 1
+fi
+
+echo "Image:  $IMG"
+echo "Size:   $(stat -c %s "$IMG" 2>/dev/null || wc -c < "$IMG") bytes"
+echo "SHA256: $(sha256sum "$IMG" | cut -d' ' -f1)"
+
+# Validate image metadata (verifies it's for THIS device)
+if ! sysupgrade --test "$IMG" >/dev/null 2>&1; then
+	echo "sysupgrade --test failed. Image is corrupt or not for this device." >&2
+	sysupgrade --test "$IMG"
+	exit 1
+fi
+
+# Copy image into RAM so we can unmount the SD before reflashing
+cp "$IMG" /tmp/sdcard-firmware.bin
+umount "$MOUNT"; rmdir "$MOUNT"
+trap - EXIT
+
+echo
+if [ "$KEEP_CONFIG" = 1 ]; then
+	echo "Applying sysupgrade (keeping config)..."
+	sysupgrade /tmp/sdcard-firmware.bin
+else
+	echo "Applying sysupgrade -n (wiping config)..."
+	sysupgrade -n /tmp/sdcard-firmware.bin
+fi
