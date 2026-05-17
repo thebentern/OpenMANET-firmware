@@ -99,14 +99,27 @@ if (posted) {
 			uci.set('wireless', radio_2g, 'country', country);
 		}
 
+		// --- alfred — point its batman gossip side at bat0 -------------
+		// The alfred package ships /etc/config/alfred with `list interface
+		// 'br-ahwlan'` because it's designed for OpenMANET's HaLow boards
+		// (which have a HaLow LAN bridge). On AXT-1800 there is no
+		// br-ahwlan, so alfred spins forever logging "can't get interface".
+		// Overwrite to bat0 here so the wizard fully provisions the stack.
+		if (uci.get('alfred', 'alfred')) {
+			uci.set('alfred', 'alfred', 'interface', ['bat0']);
+			uci.set('alfred', 'alfred', 'batmanif',  'bat0');
+			uci.commit('alfred');
+		}
+
 		uci.commit('wireless');
 		uci.commit('network');
 
-		// Reload both — wifi reload picks up wireless.mesh0, network
-		// reload picks up bat0 / mesh. Non-blocking so the HTTP response
-		// to the user goes out first.
-		popen('(sleep 1 && /etc/init.d/network reload && wifi reload) &', 'r');
-		msg = 'Saved. Wireless and batman-adv reloading…';
+		// Reload everything non-blocking so the HTTP response goes out
+		// first. wifi reload picks up wireless.mesh0, network reload
+		// picks up bat0/mesh, alfred restart picks up the new -i bat0.
+		// The [ -x ] guards make this safe even if alfred isn't installed.
+		popen('(sleep 1 && /etc/init.d/network reload && wifi reload && [ -x /etc/init.d/alfred ] && /etc/init.d/alfred restart) &', 'r');
+		msg = 'Saved. Wireless, batman-adv, and alfred reloading…';
 	}
 }
 
