@@ -68,6 +68,13 @@ if (posted) {
 		uci.set('network', 'bat0', 'routing_algo',    'BATMAN_V');
 		uci.set('network', 'bat0', 'aggregated_ogms', '1');
 		uci.set('network', 'bat0', 'gw_mode',         'off');
+		// Clear the stale multicast_mode='0' that kmod-batman-adv's UCI
+		// defaults seed into the section. With it set to '0', batman-adv
+		// disables its multicast optimizations and refuses to forward
+		// CoT/multicast across the mesh — which kills ATAK position
+		// broadcasts. Deleting falls back to batman-adv's own default
+		// (mode=1, multicast snooping enabled).
+		uci.delete('network', 'bat0', 'multicast_mode');
 
 		// --- network.mesh (batman-adv hard-iface; binds wifi to bat0) ---
 		if (!uci.get('network', 'mesh'))
