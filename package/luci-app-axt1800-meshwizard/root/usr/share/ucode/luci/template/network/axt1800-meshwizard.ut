@@ -1,0 +1,149 @@
+{%
+//
+// AXT-1800 OpenMANET mesh setup wizard, server-side rendered.
+//
+// Pure ucode template, no JS view. The "type": "view" path involves
+// LuCI's client-side runtime calling ui.instantiateView(...) which has
+// somehow tickled a deterministic brick on AXT-1800 + OpenMANET 24.10
+// (6.6 kernel + ipq60xx backported from upstream main). Avoiding that
+// code path entirely by rendering HTML server-side here.
+//
+
+import { cursor } from 'uci';
+import { popen } from 'fs';
+
+const uci = cursor();
+
+// --- Detect the 5 GHz wifi-device dynamically ---
+let radio_5g = null;
+let radio_2g = null;
+uci.foreach('wireless', 'wifi-device', (s) => {
+	if (s.band == '5g') radio_5g ??= s['.name'];
+	if (s.band == '2g') radio_2g ??= s['.name'];
+});
+
+const COUNTRIES = [
+	['00', 'World (default, restricted)'],
+	['US', 'United States'],
+	['CA', 'Canada'],
+	['GB', 'United Kingdom'],
+	['DE', 'Germany'],
+	['FR', 'France'],
+	['NL', 'Netherlands'],
+	['SE', 'Sweden'],
+	['AU', 'Australia'],
+	['NZ', 'New Zealand'],
+	['JP', 'Japan']
+];
+
+const CHANNELS_5G = ['36','40','44','48','149','153','157','161','165'];
+
+// --- Handle POST submission ---
+let posted = http.getenv('REQUEST_METHOD') == 'POST';
+let msg = null;
+
+if (posted) {
+	let mesh_id    = http.formvalue('mesh_id')    || 'openmanet-mesh';
+	let channel    = http.formvalue('channel')    || '36';
+	let encryption = http.formvalue('encryption') || 'none';
+	let key        = http.formvalue('key')        || '';
+	let country    = http.formvalue('country')    || '00';
+
+	// mesh0 wifi-iface (uci-defaults created this; we just update it)
+	uci.set('wireless', 'mesh0', 'mesh_id',    mesh_id);
+	uci.set('wireless', 'mesh0', 'encryption', encryption);
+	if (encryption == 'sae' && length(key) >= 8)
+		uci.set('wireless', 'mesh0', 'key', key);
+	else
+		uci.delete('wireless', 'mesh0', 'key');
+
+	if (radio_5g) {
+		uci.set('wireless', radio_5g, 'channel', channel);
+		uci.set('wireless', radio_5g, 'country', country);
+	}
+	if (radio_2g) {
+		uci.set('wireless', radio_2g, 'country', country);
+	}
+
+	uci.commit('wireless');
+	// Reload wireless config — non-blocking, the user's HTTP response goes out first
+	popen('(sleep 1 && wifi reload) &', 'r');
+	msg = 'Saved. Wireless reloading…';
+}
+
+// --- Read current values for rendering ---
+const cur_mesh_id    = uci.get('wireless', 'mesh0', 'mesh_id')    || 'openmanet-mesh';
+const cur_encryption = uci.get('wireless', 'mesh0', 'encryption') || 'none';
+const cur_key        = uci.get('wireless', 'mesh0', 'key')        || '';
+const cur_channel    = (radio_5g && uci.get('wireless', radio_5g, 'channel')) || '36';
+const cur_country    = (radio_5g && uci.get('wireless', radio_5g, 'country')) || '00';
+
+include('header');
+%}
+
+<h2>{{ _('AXT-1800 Mesh Wizard') }}</h2>
+
+<p>{{ _('Configure the 802.11s mesh on the 5 GHz radio. Other nodes joining must use the same Mesh ID, channel, and encryption key.') }}</p>
+
+{% if (msg): %}
+<div style="background:#2d6a4f;color:#fff;padding:10px;border-radius:6px;margin-bottom:1em;">
+	{{ msg }}
+</div>
+{% endif %}
+
+<form method="POST" action="" style="max-width:640px;">
+	<fieldset>
+		<legend>{{ _('Mesh') }}</legend>
+
+		<p>
+			<label><b>{{ _('Mesh ID') }}</b></label><br>
+			<input type="text" name="mesh_id" value="{{ cur_mesh_id }}" required style="width:100%;padding:6px;">
+			<small>{{ _('Must match on every node. Treated as a network identifier, not a secret.') }}</small>
+		</p>
+
+		<p>
+			<label><b>{{ _('5 GHz Channel') }}</b></label><br>
+			<select name="channel" style="width:100%;padding:6px;">
+			{% for (ch in CHANNELS_5G): %}
+				<option value="{{ ch }}"{{ ch == cur_channel ? ' selected' : '' }}>{{ ch }}</option>
+			{% endfor %}
+			</select>
+			<small>{{ _('Non-DFS channels are 36/40/44/48 and 149-165 — no radar-wait on bring-up.') }}</small>
+		</p>
+
+		<p>
+			<label><b>{{ _('Encryption') }}</b></label><br>
+			<select name="encryption" style="width:100%;padding:6px;">
+				<option value="none"{{ cur_encryption == 'none' ? ' selected' : '' }}>{{ _('None (open mesh)') }}</option>
+				<option value="sae"{{ cur_encryption == 'sae' ? ' selected' : '' }}>{{ _('SAE (WPA3)') }}</option>
+			</select>
+		</p>
+
+		<p>
+			<label><b>{{ _('Passphrase (if SAE)') }}</b></label><br>
+			<input type="password" name="key" value="{{ cur_key }}" minlength="8" maxlength="63" style="width:100%;padding:6px;">
+			<small>{{ _('8–63 characters. Must match on all peers.') }}</small>
+		</p>
+	</fieldset>
+
+	<fieldset>
+		<legend>{{ _('Regulatory') }}</legend>
+		<p>
+			<label><b>{{ _('Country Code') }}</b></label><br>
+			<select name="country" style="width:100%;padding:6px;">
+			{% for (c in COUNTRIES): %}
+				<option value="{{ c[0] }}"{{ c[0] == cur_country ? ' selected' : '' }}>{{ c[1] }}</option>
+			{% endfor %}
+			</select>
+			<small>{{ _('Applied to both radios. Required for full TX power and to unlock regional channels.') }}</small>
+		</p>
+	</fieldset>
+
+	<p>
+		<button type="submit" class="btn cbi-button cbi-button-apply" style="padding:8px 16px;">
+			{{ _('Save & Apply') }}
+		</button>
+	</p>
+</form>
+
+{% include('footer'); %}

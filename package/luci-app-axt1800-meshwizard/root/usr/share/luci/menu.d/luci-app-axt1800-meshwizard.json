@@ -3,7 +3,7 @@
 		"title": "Mesh Wizard",
 		"order": 5,
 		"action": {
-			"type": "view",
+			"type": "template",
 			"path": "network/axt1800-meshwizard"
 		},
 		"depends": {
