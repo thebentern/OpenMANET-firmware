@@ -27,6 +27,16 @@
 # uci-defaults runner cleans this script up.
 #
 
+# --- 0. LuCI theme: switch to OpenMANET argon if it's installed -------
+# The argon theme ships with the all-in-one image build. If it's not
+# present (e.g. apk-install on stock 25.12.4 without the theme), we
+# silently leave luci.main.mediaurlbase at its default — pointing it
+# at a missing theme would 500 LuCI on every page load.
+if [ -d /www/luci-static/openmanetargon ]; then
+	uci -q set luci.main.mediaurlbase='/luci-static/openmanetargon'
+	uci -q commit luci
+fi
+
 # --- 1. Pin openmanetd's address-reservation worker off ----------------
 if [ -f /etc/config/openmanetd ]; then
 	uci set openmanetd.config.dhcpconfigured=1
