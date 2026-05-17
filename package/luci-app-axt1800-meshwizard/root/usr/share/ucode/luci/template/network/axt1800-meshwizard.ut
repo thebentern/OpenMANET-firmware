@@ -49,26 +49,61 @@ if (posted) {
 	let key        = http.formvalue('key')        || '';
 	let country    = http.formvalue('country')    || '00';
 
-	// mesh0 wifi-iface (uci-defaults created this; we just update it)
-	uci.set('wireless', 'mesh0', 'mesh_id',    mesh_id);
-	uci.set('wireless', 'mesh0', 'encryption', encryption);
-	if (encryption == 'sae' && length(key) >= 8)
-		uci.set('wireless', 'mesh0', 'key', key);
-	else
-		uci.delete('wireless', 'mesh0', 'key');
+	if (!radio_5g) {
+		msg = 'No 5 GHz wifi-device found in /etc/config/wireless — cannot configure mesh.';
+	} else {
+		// --- network.bat0 (batman-adv soft-iface) -----------------------
+		// Pure L2 by default — no IP assignment. User can bridge into LAN
+		// or set a static IP via Network → Interfaces afterward. We avoid
+		// touching network.lan here to eliminate lockout risk.
+		if (!uci.get('network', 'bat0')) {
+			uci.set('network', 'bat0', 'interface');
+			uci.set('network', 'bat0', 'proto',           'batadv');
+			uci.set('network', 'bat0', 'routing_algo',    'BATMAN_V');
+			uci.set('network', 'bat0', 'aggregated_ogms', '1');
+			uci.set('network', 'bat0', 'gw_mode',         'off');
+		}
 
-	if (radio_5g) {
-		uci.set('wireless', radio_5g, 'channel', channel);
-		uci.set('wireless', radio_5g, 'country', country);
-	}
-	if (radio_2g) {
-		uci.set('wireless', radio_2g, 'country', country);
-	}
+		// --- network.mesh (batman-adv hard-iface; binds wifi to bat0) ---
+		if (!uci.get('network', 'mesh')) {
+			uci.set('network', 'mesh', 'interface');
+			uci.set('network', 'mesh', 'proto',  'batadv_hardif');
+			uci.set('network', 'mesh', 'master', 'bat0');
+		}
 
-	uci.commit('wireless');
-	// Reload wireless config — non-blocking, the user's HTTP response goes out first
-	popen('(sleep 1 && wifi reload) &', 'r');
-	msg = 'Saved. Wireless reloading…';
+		// --- wireless.mesh0 (the 802.11s wifi-iface on the 5 GHz radio) -
+		if (!uci.get('wireless', 'mesh0')) {
+			uci.set('wireless', 'mesh0', 'wifi-iface');
+		}
+		uci.set('wireless', 'mesh0', 'device',     radio_5g);
+		uci.set('wireless', 'mesh0', 'network',    'mesh');
+		uci.set('wireless', 'mesh0', 'mode',       'mesh');
+		uci.set('wireless', 'mesh0', 'disabled',   '0');
+		uci.set('wireless', 'mesh0', 'mesh_id',    mesh_id);
+		uci.set('wireless', 'mesh0', 'encryption', encryption);
+		if (encryption == 'sae' && length(key) >= 8)
+			uci.set('wireless', 'mesh0', 'key', key);
+		else
+			uci.delete('wireless', 'mesh0', 'key');
+
+		// --- Radio settings — channel, country, and enable the radio ---
+		// Stock OpenWrt ships radios with disabled=1; mesh needs them on.
+		uci.set('wireless', radio_5g, 'disabled', '0');
+		uci.set('wireless', radio_5g, 'channel',  channel);
+		uci.set('wireless', radio_5g, 'country',  country);
+		if (radio_2g) {
+			uci.set('wireless', radio_2g, 'country', country);
+		}
+
+		uci.commit('wireless');
+		uci.commit('network');
+
+		// Reload both — wifi reload picks up wireless.mesh0, network
+		// reload picks up bat0 / mesh. Non-blocking so the HTTP response
+		// to the user goes out first.
+		popen('(sleep 1 && /etc/init.d/network reload && wifi reload) &', 'r');
+		msg = 'Saved. Wireless and batman-adv reloading…';
+	}
 }
 
 // --- Read current values for rendering ---
