@@ -107,6 +107,26 @@ if (posted) {
 			uci.set('wireless', radio_2g, 'country', country);
 		}
 
+		// --- bat0 L3 (optional) — assign a static IP to the mesh ------
+		// network.bat0 owns proto=batadv (creates the bat0 netdev). To put
+		// L3 on top, we use a SECOND interface section that targets bat0
+		// as its device. Keeps the proto=batadv config clean and avoids
+		// netifd confusion.
+		let bat_ip      = http.formvalue('bat_ip')      || '';
+		let bat_netmask = http.formvalue('bat_netmask') || '255.255.0.0';
+
+		if (length(bat_ip) >= 7) {
+			if (!uci.get('network', 'bat0_ip'))
+				uci.set('network', 'bat0_ip', 'interface');
+			uci.set('network', 'bat0_ip', 'device',  'bat0');
+			uci.set('network', 'bat0_ip', 'proto',   'static');
+			uci.set('network', 'bat0_ip', 'ipaddr',  bat_ip);
+			uci.set('network', 'bat0_ip', 'netmask', bat_netmask);
+		} else if (uci.get('network', 'bat0_ip')) {
+			// Operator cleared the field — opt out of L3 entirely.
+			uci.delete('network', 'bat0_ip');
+		}
+
 		// --- alfred — point its batman gossip side at bat0 -------------
 		// The alfred package ships /etc/config/alfred with `list interface
 		// 'br-ahwlan'` because it's designed for OpenMANET's HaLow boards
@@ -132,11 +152,13 @@ if (posted) {
 }
 
 // --- Read current values for rendering ---
-const cur_mesh_id    = uci.get('wireless', 'mesh0', 'mesh_id')    || 'openmanet-mesh';
-const cur_encryption = uci.get('wireless', 'mesh0', 'encryption') || 'none';
-const cur_key        = uci.get('wireless', 'mesh0', 'key')        || '';
-const cur_channel    = (radio_5g && uci.get('wireless', radio_5g, 'channel')) || '36';
-const cur_country    = (radio_5g && uci.get('wireless', radio_5g, 'country')) || '00';
+const cur_mesh_id     = uci.get('wireless', 'mesh0', 'mesh_id')     || 'openmanet-mesh';
+const cur_encryption  = uci.get('wireless', 'mesh0', 'encryption')  || 'none';
+const cur_key         = uci.get('wireless', 'mesh0', 'key')         || '';
+const cur_channel     = (radio_5g && uci.get('wireless', radio_5g, 'channel')) || '36';
+const cur_country     = (radio_5g && uci.get('wireless', radio_5g, 'country')) || '00';
+const cur_bat_ip      = uci.get('network', 'bat0_ip', 'ipaddr')     || '';
+const cur_bat_netmask = uci.get('network', 'bat0_ip', 'netmask')    || '255.255.0.0';
 
 include('header');
 %}
@@ -183,6 +205,22 @@ include('header');
 			<label><b>{{ _('Passphrase (if SAE)') }}</b></label><br>
 			<input type="password" name="key" value="{{ cur_key }}" minlength="8" maxlength="63" style="width:100%;padding:6px;">
 			<small>{{ _('8–63 characters. Must match on all peers.') }}</small>
+		</p>
+	</fieldset>
+
+	<fieldset>
+		<legend>{{ _('Mesh L3 (optional)') }}</legend>
+
+		<p>
+			<label><b>{{ _('Node IP on bat0') }}</b></label><br>
+			<input type="text" name="bat_ip" value="{{ cur_bat_ip }}" placeholder="10.41.1.1" style="width:100%;padding:6px;">
+			<small>{{ _('Leave blank for L2-only mesh. To carry traffic over the mesh, give every node a unique IP in the same /16 subnet (e.g. 10.41.1.1, 10.41.1.2, …).') }}</small>
+		</p>
+
+		<p>
+			<label><b>{{ _('Netmask') }}</b></label><br>
+			<input type="text" name="bat_netmask" value="{{ cur_bat_netmask }}" placeholder="255.255.0.0" style="width:100%;padding:6px;">
+			<small>{{ _('Defaults to /16 (255.255.0.0) so up to ~65k mesh nodes fit.') }}</small>
 		</p>
 	</fieldset>
 
