@@ -56,20 +56,24 @@ if (posted) {
 		// Pure L2 by default — no IP assignment. User can bridge into LAN
 		// or set a static IP via Network → Interfaces afterward. We avoid
 		// touching network.lan here to eliminate lockout risk.
-		if (!uci.get('network', 'bat0')) {
+		//
+		// Idempotent: create the section type only when missing, but
+		// always overwrite the option values. A previous install can
+		// leave a stub bat0 section with stray fields (kmod-batman-adv's
+		// default state seeds multicast_mode), so guarding all the
+		// options behind `if (!uci.get(...))` would skip the real config.
+		if (!uci.get('network', 'bat0'))
 			uci.set('network', 'bat0', 'interface');
-			uci.set('network', 'bat0', 'proto',           'batadv');
-			uci.set('network', 'bat0', 'routing_algo',    'BATMAN_V');
-			uci.set('network', 'bat0', 'aggregated_ogms', '1');
-			uci.set('network', 'bat0', 'gw_mode',         'off');
-		}
+		uci.set('network', 'bat0', 'proto',           'batadv');
+		uci.set('network', 'bat0', 'routing_algo',    'BATMAN_V');
+		uci.set('network', 'bat0', 'aggregated_ogms', '1');
+		uci.set('network', 'bat0', 'gw_mode',         'off');
 
 		// --- network.mesh (batman-adv hard-iface; binds wifi to bat0) ---
-		if (!uci.get('network', 'mesh')) {
+		if (!uci.get('network', 'mesh'))
 			uci.set('network', 'mesh', 'interface');
-			uci.set('network', 'mesh', 'proto',  'batadv_hardif');
-			uci.set('network', 'mesh', 'master', 'bat0');
-		}
+		uci.set('network', 'mesh', 'proto',  'batadv_hardif');
+		uci.set('network', 'mesh', 'master', 'bat0');
 
 		// --- wireless.mesh0 (the 802.11s wifi-iface on the 5 GHz radio) -
 		if (!uci.get('wireless', 'mesh0')) {
