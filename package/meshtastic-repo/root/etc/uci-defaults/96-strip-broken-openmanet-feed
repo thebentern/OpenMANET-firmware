@@ -1,0 +1,30 @@
+#!/bin/sh
+#
+# /etc/uci-defaults/96-strip-broken-openmanet-feed
+#
+# OpenWrt's base-files Makefile auto-generates /etc/apk/repositories.d/
+# distfeeds.list from feeds.conf.default + .config: one entry per
+# CONFIG_FEED_<name>=y feed at the canonical
+#   https://downloads.openwrt.org/.../packages/<arch>/<feed>/packages.adb
+#
+# But our `openmanet` feed lives on GitHub (github.com/OpenMANET/packages),
+# not on downloads.openwrt.org. The build system doesn't know that and emits
+# a downloads.openwrt.org URL for it anyway, which 404s and causes apk
+# update to exit 1 ("some repos unavailable").
+#
+# The openmanet packages are baked into the image at build time, so we don't
+# need a runtime repo entry for that feed anyway. Strip it on first boot,
+# before 97-meshtastic-install runs apk update.
+#
+# Long-term fix lives in the build config (set CONFIG_FEED_openmanet=m or
+# unset it entirely so this line isn't emitted in the first place). This
+# uci-defaults is a belt-and-suspenders runtime cleanup.
+
+F=/etc/apk/repositories.d/distfeeds.list
+
+if [ -f "$F" ] && grep -q '/openmanet/packages\.adb' "$F"; then
+	sed -i '/\/openmanet\/packages\.adb/d' "$F"
+	logger -t openmanet-feed-strip "Removed broken openmanet entry from $F"
+fi
+
+exit 0
