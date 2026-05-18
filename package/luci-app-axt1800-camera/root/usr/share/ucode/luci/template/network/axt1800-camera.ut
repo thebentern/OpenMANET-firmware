@@ -1,0 +1,380 @@
+{%
+//
+// AXT-1800 USB camera → RTSP setup, server-side rendered.
+//
+// Dedicated LuCI page (Network → Camera) for setting up a UVC USB webcam
+// as an RTSP stream via v4l2rtspserver. Same UCI config the mesh wizard
+// touches, but with richer controls — auto-detection of plugged cameras
+// via v4l2-ctl, QR code for the RTSP URL, separation of stream profile
+// vs access settings.
+//
+
+import { cursor } from 'uci';
+import { popen } from 'fs';
+
+const uci = cursor();
+
+// --- Helpers ---------------------------------------------------------------
+
+function shell_capture(cmd) {
+	let h = popen(cmd, 'r');
+	if (!h) return '';
+	let out = h.read('all') || '';
+	h.close();
+	return out;
+}
+
+// --- Detect cameras via v4l2-ctl --list-devices ----------------------------
+//
+// Output shape:
+//   USB 2.0 Camera: USB 2.0 Camera (usb-0000:00:01.0-1):
+//        /dev/video0
+//        /dev/video1
+//
+// Name lines have no leading whitespace and end with `:`; device lines are
+// indented and start with `/dev/`. A camera can expose multiple /dev/video*
+// nodes — usually node 0 is the primary capture, others are metadata. We
+// list them all and let the operator pick.
+let cameras = [];
+let raw = shell_capture('/usr/bin/v4l2-ctl --list-devices 2>/dev/null');
+let current_name = null;
+for (let line in split(raw, '\n')) {
+	if (length(line) == 0) {
+		current_name = null;
+		continue;
+	}
+	let lead = substr(line, 0, 1);
+	if (lead == '\t' || lead == ' ') {
+		let dev = trim(line);
+		if (substr(dev, 0, 10) == '/dev/video' && current_name) {
+			push(cameras, { name: current_name, device: dev });
+		}
+	} else {
+		let nm = trim(line);
+		if (substr(nm, -1) == ':') nm = substr(nm, 0, length(nm) - 1);
+		current_name = nm;
+	}
+}
+
+// --- POST handler ----------------------------------------------------------
+let posted = http.getenv('REQUEST_METHOD') == 'POST';
+let msg = null;
+
+if (posted) {
+	let enabled    = http.formvalue('enabled')    == '1';
+	let device     = http.formvalue('device')     || '/dev/video0';
+	let port       = http.formvalue('port')       || '8554';
+	let path       = http.formvalue('path')       || 'cam';
+	let resolution = http.formvalue('resolution') || '1280x720';
+	let fps        = http.formvalue('fps')        || '15';
+	let format     = http.formvalue('format')     || 'h264';
+	let username   = http.formvalue('username')   || '';
+	let password   = http.formvalue('password')   || '';
+
+	if (!uci.get('v4l2rtspserver', 'core'))
+		uci.set('v4l2rtspserver', 'core', 'v4l2rtspserver');
+	uci.set('v4l2rtspserver', 'core', 'enabled',    enabled ? '1' : '0');
+	uci.set('v4l2rtspserver', 'core', 'device',     device);
+	uci.set('v4l2rtspserver', 'core', 'port',       port);
+	uci.set('v4l2rtspserver', 'core', 'path',       path);
+	uci.set('v4l2rtspserver', 'core', 'resolution', resolution);
+	uci.set('v4l2rtspserver', 'core', 'fps',        fps);
+	uci.set('v4l2rtspserver', 'core', 'format',     format);
+	if (length(username) > 0 && length(password) > 0) {
+		uci.set('v4l2rtspserver', 'core', 'username', username);
+		uci.set('v4l2rtspserver', 'core', 'password', password);
+	} else {
+		uci.delete('v4l2rtspserver', 'core', 'username');
+		uci.delete('v4l2rtspserver', 'core', 'password');
+	}
+	uci.commit('v4l2rtspserver');
+
+	// Restart the daemon non-blocking so the response comes back fast.
+	popen('(sleep 1 && [ -x /etc/init.d/v4l2rtspserver ] && /etc/init.d/v4l2rtspserver restart) &', 'r');
+	msg = 'Saved. v4l2rtspserver restarting…';
+}
+
+// --- Read current values for rendering -------------------------------------
+const cur_enabled    = uci.get('v4l2rtspserver', 'core', 'enabled') == '1';
+const cur_device     = uci.get('v4l2rtspserver', 'core', 'device')     || '/dev/video0';
+const cur_port       = uci.get('v4l2rtspserver', 'core', 'port')       || '8554';
+const cur_path       = uci.get('v4l2rtspserver', 'core', 'path')       || 'cam';
+const cur_resolution = uci.get('v4l2rtspserver', 'core', 'resolution') || '1280x720';
+const cur_fps        = uci.get('v4l2rtspserver', 'core', 'fps')        || '15';
+const cur_format     = uci.get('v4l2rtspserver', 'core', 'format')     || 'h264';
+const cur_username   = uci.get('v4l2rtspserver', 'core', 'username')   || '';
+const cur_password   = uci.get('v4l2rtspserver', 'core', 'password')   || '';
+
+// Build the RTSP URL. Strip CIDR from the LAN IP. Embed auth if both fields
+// are set. Best-effort — operators using special chars in passwords need
+// to URL-encode themselves; not worth pulling in a URL-encoder for MVP.
+const lan_ip_raw = uci.get('network', 'lan', 'ipaddr') || '192.168.1.1';
+const lan_ip = split(lan_ip_raw, '/')[0];
+const auth_prefix = (length(cur_username) > 0 && length(cur_password) > 0)
+	? sprintf('%s:%s@', cur_username, cur_password)
+	: '';
+const rtsp_url = sprintf('rtsp://%s%s:%s/%s', auth_prefix, lan_ip, cur_port, cur_path);
+
+const RESOLUTIONS = [ '320x240', '640x480', '1280x720', '1920x1080', '3840x2160' ];
+const FPS_OPTIONS = [ '5', '10', '15', '24', '30' ];
+
+include('header');
+%}
+
+<style>
+.cam-url {
+	font-family: monospace; font-size: 1.05em;
+	background: rgba(127,127,127,0.12); padding: 0.5em 0.7em; border-radius: 4px;
+	word-break: break-all; user-select: all;
+}
+.cam-empty {
+	padding: 0.8em 1em; background: rgba(255,170,0,0.18);
+	border-left: 3px solid #fa0; border-radius: 4px;
+}
+.cam-status-pill {
+	display: inline-block; padding: 0.15em 0.7em; border-radius: 1em;
+	font-size: 0.75em; font-weight: 600; vertical-align: middle; margin-left: 0.5em;
+}
+.cam-status-on  { background: #2d6a4f; color: #fff; }
+.cam-status-off { background: #888;    color: #fff; }
+.cam-qr-card {
+	display: flex; gap: 1.5em; align-items: flex-start; flex-wrap: wrap;
+}
+.cam-qr-card canvas { background: #fff; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+.cam-qr-card .cam-qr-help { flex: 1; min-width: 220px; }
+.cam-buttons { margin-top: 0.5em; }
+.cam-buttons .cbi-button { margin-right: 0.5em; }
+</style>
+
+<div class="cbi-map">
+	<h2 name="content">{{ _('USB Camera → RTSP Stream') }}</h2>
+	<div class="cbi-map-descr">
+		{{ _('Plug a UVC-class USB webcam into the AXT-1800\'s USB-A port, dial in the stream profile below, hit Save & Apply. The camera is then served at the URL shown in the "Share the stream" section — any mesh peer can pull it in VLC, ATAK, FFmpeg, etc.') }}
+	</div>
+
+	{% if (msg): %}
+	<div class="alert-message notice" style="background:#2d6a4f;color:#fff;padding:10px;border-radius:6px;margin:1em 0;">{{ msg }}</div>
+	{% endif %}
+
+	<fieldset class="cbi-section">
+		<legend>{{ _('Detected cameras') }}</legend>
+		<div class="cbi-section-descr">
+			{{ _('Live enumeration via `v4l2-ctl --list-devices`. Reload the page after plug/unplug to refresh.') }}
+		</div>
+		<div class="cbi-section-node">
+		{% if (length(cameras) == 0): %}
+			<div class="cam-empty">
+				{{ _('No /dev/video* devices found. Plug in a UVC USB webcam and reload this page. If the camera is plugged in but doesn\'t appear, SSH in and run `v4l2-ctl --list-devices` and `dmesg | tail` to see whether the kernel registered it.') }}
+			</div>
+		{% else: %}
+			<table class="table cbi-section-table" style="width:100%;">
+				<thead>
+					<tr>
+						<th>{{ _('Model / location') }}</th>
+						<th>{{ _('Device') }}</th>
+						<th>{{ _('Status') }}</th>
+					</tr>
+				</thead>
+				<tbody>
+				{% for (c in cameras): %}
+					<tr>
+						<td><code>{{ c.name }}</code></td>
+						<td><code>{{ c.device }}</code></td>
+						<td>{{ c.device == cur_device ? _('selected') : '' }}</td>
+					</tr>
+				{% endfor %}
+				</tbody>
+			</table>
+		{% endif %}
+		</div>
+	</fieldset>
+
+	<form method="POST" action="">
+		<fieldset class="cbi-section">
+			<legend>{{ _('Stream profile') }}</legend>
+			<div class="cbi-section-node">
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-enabled">{{ _('Stream enabled') }}</label>
+					<div class="cbi-value-field">
+						<input class="cbi-input-checkbox" id="cbi-enabled" type="checkbox" name="enabled" value="1"{{ cur_enabled ? ' checked' : '' }}>
+						<div class="cbi-value-description">{{ _('Off = daemon idles, no sockets opened, no camera contention.') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-device">{{ _('Video device') }}</label>
+					<div class="cbi-value-field">
+						<select class="cbi-input-select" id="cbi-device" name="device">
+						{% if (length(cameras) == 0): %}
+							<option value="{{ cur_device }}" selected>{{ cur_device }} ({{ _('not currently plugged in') }})</option>
+						{% else: %}
+							{% for (c in cameras): %}
+								<option value="{{ c.device }}"{{ c.device == cur_device ? ' selected' : '' }}>{{ c.device }} — {{ c.name }}</option>
+							{% endfor %}
+						{% endif %}
+						</select>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-format">{{ _('Format') }}</label>
+					<div class="cbi-value-field">
+						<select class="cbi-input-select" id="cbi-format" name="format">
+							<option value="h264"{{ cur_format == 'h264' ? ' selected' : '' }}>{{ _('H.264 (recommended)') }}</option>
+							<option value="mjpeg"{{ cur_format == 'mjpeg' ? ' selected' : '' }}>{{ _('MJPEG') }}</option>
+							<option value="yuyv"{{ cur_format == 'yuyv' ? ' selected' : '' }}>{{ _('YUYV (raw)') }}</option>
+						</select>
+						<div class="cbi-value-description">{{ _('H.264 has by far the lowest bandwidth for a given quality and is what every modern viewer expects. Only deviate if your camera doesn\'t support H.264 natively.') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-resolution">{{ _('Resolution') }}</label>
+					<div class="cbi-value-field">
+						<select class="cbi-input-select" id="cbi-resolution" name="resolution">
+						{% for (r in RESOLUTIONS): %}
+							<option value="{{ r }}"{{ r == cur_resolution ? ' selected' : '' }}>{{ r }}</option>
+						{% endfor %}
+						</select>
+						<div class="cbi-value-description">{{ _('1280x720 is the sweet spot for mesh links — sharp enough to read text and ID people, low enough bitrate (≈1.5 Mbps at 15 fps H.264) to not dominate the radio.') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-fps">{{ _('Framerate') }}</label>
+					<div class="cbi-value-field">
+						<select class="cbi-input-select" id="cbi-fps" name="fps">
+						{% for (f in FPS_OPTIONS): %}
+							<option value="{{ f }}"{{ f == cur_fps ? ' selected' : '' }}>{{ f }} fps</option>
+						{% endfor %}
+						</select>
+						<div class="cbi-value-description">{{ _('15 fps is plenty for situational awareness and halves the bandwidth vs 30 fps. Drop to 10 or 5 fps to stretch the mesh further.') }}</div>
+					</div>
+				</div>
+
+			</div>
+		</fieldset>
+
+		<fieldset class="cbi-section">
+			<legend>{{ _('Access') }}</legend>
+			<div class="cbi-section-node">
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-path">{{ _('Stream path') }}</label>
+					<div class="cbi-value-field">
+						<input class="cbi-input-text" id="cbi-path" type="text" name="path" value="{{ cur_path }}" placeholder="cam">
+						<div class="cbi-value-description">{{ _('Appended after host:port. With path "cam" the URL is rtsp://&lt;host&gt;:&lt;port&gt;/cam.') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-port">{{ _('Port') }}</label>
+					<div class="cbi-value-field">
+						<input class="cbi-input-text" id="cbi-port" type="text" name="port" value="{{ cur_port }}" placeholder="8554">
+						<div class="cbi-value-description">{{ _('8554 by default. RTSP\'s registered port is 554 but binding < 1024 requires CAP_NET_BIND_SERVICE which procd doesn\'t give the daemon. Most RTSP clients accept any port in the URL.') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-username">{{ _('Username (optional)') }}</label>
+					<div class="cbi-value-field">
+						<input class="cbi-input-text" id="cbi-username" type="text" name="username" value="{{ cur_username }}">
+						<div class="cbi-value-description">{{ _('Blank = open stream, any peer on the mesh can pull. Fill in both username and password to require RTSP basic-auth.') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-password">{{ _('Password (optional)') }}</label>
+					<div class="cbi-value-field">
+						<input class="cbi-input-password" id="cbi-password" type="password" name="password" value="{{ cur_password }}">
+					</div>
+				</div>
+
+			</div>
+		</fieldset>
+
+		<div class="cbi-page-actions">
+			<button class="cbi-button cbi-button-apply" type="submit">{{ _('Save & Apply') }}</button>
+		</div>
+	</form>
+
+	<fieldset class="cbi-section">
+		<legend>
+			{{ _('Share the stream') }}
+			<span class="cam-status-pill {{ cur_enabled ? 'cam-status-on' : 'cam-status-off' }}">{{ cur_enabled ? _('LIVE') : _('OFF') }}</span>
+		</legend>
+		<div class="cbi-section-descr">
+			{{ _('Open the URL in VLC (Media → Open Network Stream), ATAK (Stream → Connect to remote), FFmpeg, etc. The QR code is the same URL — scan with a phone for one-tap setup in ATAK mobile / VLC mobile.') }}
+		</div>
+		<div class="cbi-section-node">
+
+			<div class="cbi-value">
+				<label class="cbi-value-title">{{ _('Stream URL') }}</label>
+				<div class="cbi-value-field">
+					<div class="cam-url" id="rtsp-url">{{ rtsp_url }}</div>
+					<div class="cam-buttons">
+						<button type="button" class="cbi-button" id="copy-url">{{ _('Copy URL') }}</button>
+						{% if (cur_enabled): %}
+						<a class="cbi-button cbi-button-action" href="{{ rtsp_url }}">{{ _('Open in default RTSP handler') }}</a>
+						{% endif %}
+					</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title">{{ _('QR code') }}</label>
+				<div class="cbi-value-field">
+					<div class="cam-qr-card">
+						<canvas id="rtsp-qr" width="240" height="240"></canvas>
+						<div class="cam-qr-help">
+							<p>{{ _('Scan with your phone\'s camera. iOS will recognise the rtsp:// URL and offer to open it in the default RTSP-capable app (VLC, ATAK Civ if installed, etc.). Android: long-press the recognised URL.') }}</p>
+							<p>{{ _('For headless setup of remote viewer devices, screenshot the QR and AirDrop / scp to them.') }}</p>
+						</div>
+					</div>
+				</div>
+			</div>
+
+		</div>
+	</fieldset>
+</div>
+
+<script src="/luci-static/resources/axt1800-camera/qrious.min.js"></script>
+<script>
+(function() {
+	var urlEl = document.getElementById('rtsp-url');
+	var canvas = document.getElementById('rtsp-qr');
+	if (urlEl && canvas && typeof QRious !== 'undefined') {
+		new QRious({
+			element: canvas,
+			value: urlEl.innerText.trim(),
+			size: 240,
+			level: 'M',
+			foreground: '#000',
+			background: '#fff'
+		});
+	}
+	var copyBtn = document.getElementById('copy-url');
+	if (copyBtn && urlEl) {
+		copyBtn.addEventListener('click', function() {
+			var txt = urlEl.innerText.trim();
+			if (navigator.clipboard) {
+				navigator.clipboard.writeText(txt).then(function() {
+					copyBtn.innerText = 'Copied ✓';
+					setTimeout(function() { copyBtn.innerText = 'Copy URL'; }, 1500);
+				});
+			} else {
+				// Fallback: select the text
+				var range = document.createRange();
+				range.selectNode(urlEl);
+				window.getSelection().removeAllRanges();
+				window.getSelection().addRange(range);
+				copyBtn.innerText = 'Selected — press ⌘C';
+				setTimeout(function() { copyBtn.innerText = 'Copy URL'; }, 2500);
+			}
+		});
+	}
+})();
+</script>
+
+{% include('footer'); %}

@@ -207,3 +207,9 @@ CONFIG_PACKAGE_v4l2rtspserver=y
 CONFIG_PACKAGE_kmod-video-core=y
 CONFIG_PACKAGE_kmod-video-uvc=y
 CONFIG_PACKAGE_kmod-video-videobuf2=y
+# v4l-utils gives us v4l2-ctl, which the LuCI camera page uses to enumerate
+# plugged USB cameras and (later) supported pixel formats.
+CONFIG_PACKAGE_v4l-utils=y
+# Dedicated LuCI page (Network → Camera) with auto-detection + URL + QR code
+# for one-tap setup on ATAK/VLC mobile.
+CONFIG_PACKAGE_luci-app-axt1800-camera=y
