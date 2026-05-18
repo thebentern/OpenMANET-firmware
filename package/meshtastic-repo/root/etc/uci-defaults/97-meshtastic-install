@@ -8,38 +8,76 @@
 #
 # Behavior:
 #   - Try `apk update && apk add ...`
-#   - On success: enable + start the meshtasticd service, exit 0.
-#     uci-defaults runner deletes this script after exit 0.
-#   - On failure (e.g. no internet at boot): exit non-zero so the
-#     uci-defaults runner LEAVES the script in place, and it retries
-#     on the next boot.
+#   - On success AND meshtasticd verified installed: enable + start the
+#     daemon, exit 0. The uci-defaults runner deletes this script after
+#     exit 0.
+#   - On any failure (no internet, package gone, signature mismatch,
+#     etc.): exit non-zero so the uci-defaults runner LEAVES the script
+#     in place, and it retries on the next boot.
 #
-# Operators with no internet can ignore this entirely and install
-# manually later via `apk update && apk add meshtasticd …`.
+# Operators with no internet at boot can ignore this entirely and
+# install manually later via the same one-liner:
+#   apk update && apk add meshtasticd meshtasticd-web \
+#       meshtasticd-avahi-service python3-meshtastic
+#
+# IMPORTANT: do NOT use `cmd | logger` to check command status. A
+# pipeline's exit status is the LAST command's, so `logger`'s zero
+# masks any real failure upstream. Capture to a tempfile, check $?
+# explicitly, then drain the file through logger separately.
 
 PKGS="meshtasticd meshtasticd-web meshtasticd-avahi-service python3-meshtastic"
 LOG_TAG="meshtastic-install"
+TMP="$(mktemp -t meshtastic-install.XXXXXX 2>/dev/null || echo /tmp/meshtastic-install.$$.log)"
 
-# Don't fail the boot just because there's no internet — we'll just
-# retry later. Use logger so progress shows up in `logread`.
 log() { logger -t "$LOG_TAG" -- "$@"; }
 
-log "starting (attempt $(date '+%H:%M:%S'))"
+# Drain a captured tempfile through logger line-by-line. Critically,
+# this is NOT in a pipeline with apk, so we never lose apk's exit code.
+emit() {
+	[ -s "$TMP" ] || return 0
+	while IFS= read -r line; do
+		logger -t "$LOG_TAG" -- "$line"
+	done < "$TMP"
+}
 
-if ! apk update 2>&1 | logger -t "$LOG_TAG"; then
-	log "apk update failed (no internet?). Will retry on next boot."
+cleanup() { rm -f "$TMP"; }
+trap cleanup EXIT
+
+log "starting (attempt $(date '+%Y-%m-%d %H:%M:%S'))"
+
+# --- apk update ------------------------------------------------------------
+apk update > "$TMP" 2>&1
+rc=$?
+emit
+if [ "$rc" -ne 0 ]; then
+	log "apk update failed (exit $rc — no internet?). Will retry on next boot."
 	exit 1
 fi
 
-if apk add $PKGS 2>&1 | logger -t "$LOG_TAG"; then
-	log "all packages installed"
-	# Make sure the daemon starts now AND at every boot from here on.
-	if [ -x /etc/init.d/meshtasticd ]; then
-		/etc/init.d/meshtasticd enable 2>&1 | logger -t "$LOG_TAG" || true
-		/etc/init.d/meshtasticd start  2>&1 | logger -t "$LOG_TAG" || true
-	fi
-	exit 0
+# --- apk add ---------------------------------------------------------------
+apk add $PKGS > "$TMP" 2>&1
+rc=$?
+emit
+if [ "$rc" -ne 0 ]; then
+	log "apk add failed (exit $rc). Will retry on next boot."
+	exit 1
 fi
 
-log "apk add failed. Will retry on next boot."
-exit 1
+# Belt-and-suspenders: even if apk add returns 0, verify the daemon
+# package actually landed on disk. Otherwise we'd delete this script
+# and lose retry-on-next-boot.
+if ! apk info -e meshtasticd > /dev/null 2>&1; then
+	log "apk add returned 0 but meshtasticd is not installed. Will retry on next boot."
+	exit 1
+fi
+
+# --- enable + start --------------------------------------------------------
+log "all packages installed; enabling + starting meshtasticd"
+if [ -x /etc/init.d/meshtasticd ]; then
+	/etc/init.d/meshtasticd enable > "$TMP" 2>&1 || true
+	emit
+	/etc/init.d/meshtasticd start  > "$TMP" 2>&1 || true
+	emit
+fi
+
+exit 0
