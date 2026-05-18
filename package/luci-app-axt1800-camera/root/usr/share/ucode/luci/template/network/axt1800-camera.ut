@@ -149,7 +149,7 @@ include('header');
 <div class="cbi-map">
 	<h2 name="content">{{ _('USB Camera → RTSP Stream') }}</h2>
 	<div class="cbi-map-descr">
-		{{ _('Plug a UVC-class USB webcam into the AXT-1800\'s USB-A port, dial in the stream profile below, hit Save & Apply. The camera is then served at the URL shown in the "Share the stream" section — any mesh peer can pull it in VLC, ATAK, FFmpeg, etc.') }}
+		{{ _('Plug a UVC-class USB webcam into the router\'s USB port, dial in the stream profile below, hit Save & Apply. The camera is then served at the URL shown in the "Share the stream" section — any mesh peer can pull it in VLC, ATAK, FFmpeg, etc.') }}
 	</div>
 
 	{% if (msg): %}

@@ -343,7 +343,7 @@ include('header');
 %}
 
 <div class="cbi-map">
-	<h2 name="content">{{ _('AXT-1800 Mesh Wizard') }}</h2>
+	<h2 name="content">{{ _('Mesh Wizard') }}</h2>
 	<div class="cbi-map-descr">
 		{{ _('Configure the 802.11s mesh on the 5 GHz radio. Other nodes joining must use the same Mesh ID, channel, and encryption key.') }}
 	</div>
@@ -503,7 +503,7 @@ include('header');
 		<fieldset class="cbi-section">
 			<legend>{{ _('USB camera → RTSP stream (optional)') }}</legend>
 			<div class="cbi-section-descr">
-				{{ _('Plug a UVC USB webcam into the AXT-1800\'s USB-A port and this section turns it into a live RTSP stream that any peer on the mesh can pull. Stream URL ends up at rtsp://&lt;this-node-ip&gt;:8554/&lt;path&gt;. Test with VLC: Media → Open Network Stream → paste the URL. ATAK and other situational-awareness apps can consume it directly.') }}
+				{{ _('Plug a UVC USB webcam into the router\'s USB port and this section turns it into a live RTSP stream that any peer on the mesh can pull. Stream URL ends up at rtsp://&lt;this-node-ip&gt;:8554/&lt;path&gt;. For richer setup (auto-detection, QR code, etc.), use Mesh → Camera. Test with VLC: Media → Open Network Stream → paste the URL.') }}
 			</div>
 			<div class="cbi-section-node">
 

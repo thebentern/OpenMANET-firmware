@@ -15,13 +15,6 @@ A configured AXT-1800 ends up with:
 - `openmanetd` — OpenMANET management daemon + web UI (8080/8081/8087)
 - `tailscale` + `kmod-tun`
 - batman-adv kernel module + `batctl`
-- `meshtasticd` 2.7.15 + `meshtasticd-web` + `meshtasticd-avahi-service`
-  — LoRa-Meshtastic daemon. Idles cleanly without a radio; plug in a
-  USB LoRa stick (Heltec / RAK / etc.) and it picks it up. Web UI at
-  the port configured in `/etc/meshtasticd/config.yaml`. Service
-  announced via mDNS through `avahi-daemon`.
-- `python-meshtastic` CLI on the device (`meshtastic --info`,
-  `meshtastic --set …`) for SSH-based admin + scripting. Pulls Python 3.
 - `v4l2rtspserver` + `kmod-video-uvc` + `v4l-utils` — plug a UVC USB
   webcam into the router and the mesh wizard's "USB camera → RTSP
   stream" section (or the dedicated **Network → Camera** page) turns

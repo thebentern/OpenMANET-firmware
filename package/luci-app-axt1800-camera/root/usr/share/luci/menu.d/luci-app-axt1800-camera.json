@@ -1,7 +1,7 @@
 {
-	"admin/network/camera": {
+	"admin/mesh/camera": {
 		"title": "Camera",
-		"order": 6,
+		"order": 20,
 		"action": {
 			"type": "template",
 			"path": "network/axt1800-camera"

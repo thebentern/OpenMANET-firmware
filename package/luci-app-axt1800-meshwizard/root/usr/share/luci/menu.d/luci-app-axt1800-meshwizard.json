@@ -1,7 +1,17 @@
 {
-	"admin/network/meshwizard": {
-		"title": "Mesh Wizard",
-		"order": 5,
+	"admin/mesh": {
+		"title": "Mesh",
+		"order": 25,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-axt1800-meshwizard" ]
+		}
+	},
+	"admin/mesh/wizard": {
+		"title": "Wizard",
+		"order": 10,
 		"action": {
 			"type": "template",
 			"path": "network/axt1800-meshwizard"
