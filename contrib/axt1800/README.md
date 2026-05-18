@@ -160,6 +160,129 @@ and then deletes itself:
 Both operations are safe no-ops if the relevant pieces aren't installed,
 so the script is robust to package install order.
 
+## Tailscale fleet setup (for SAR / multi-router ops)
+
+802.11s + batman-adv handle the **local** mesh (no internet needed); Tailscale
+is the **overlay** that bridges your routers to a remote command center via
+whatever ad-hoc internet you've got (a phone hotspot, an LTE puck, a Starlink
+dish). The pattern that actually works:
+
+```
+                                                ┌─────────────────────┐
+                                                │  Remote command     │
+        ┌─── local 802.11s mesh ──┐             │  center (laptops    │
+        │                          │             │  on Tailscale)      │
+   axt-eagle-2 ─── axt-eagle-3 ──┴── axt-eagle-1│ ←─Tailnet─┐         │
+        │                          │       │     │            │         │
+        │  (mesh-only;             │       │     └─────────────────────┘
+        │   no internet)           │       │             ▲
+                                           │             │
+                                       WAN hotspot ──────┘
+                                       (phone tether)
+```
+
+Only `axt-eagle-1` needs internet. It advertises the mesh subnet
+(`10.41.0.0/16`) to Tailscale. The other two nodes have never seen the
+internet; they're still reachable from the command center via eagle-1's
+tunnel + subnet route.
+
+### One-time: team Tailnet (admin lead)
+
+1. **Sign up at [tailscale.com](https://tailscale.com)** with whatever
+   identity provider your team already uses (Google Workspace, Microsoft,
+   GitHub, custom OIDC). Free tier: 100 devices / 3 users.
+2. **Invite teammates.** Each installs the Tailscale client on their
+   laptop + phone. They show as user-owned devices in the admin console.
+3. **Define tags + ACL** (admin console → Access controls). Tags survive
+   team turnover; user-owned devices don't. Recommended baseline:
+
+   ```json
+   {
+     "tagOwners": {
+       "tag:axt-router": ["autogroup:admin"]
+     },
+     "acls": [
+       { "action": "accept",
+         "src": ["group:operators"],
+         "dst": ["tag:axt-router:*", "192.168.1.0/24:*", "10.41.0.0/16:*"] },
+       { "action": "accept",
+         "src": ["tag:axt-router"],
+         "dst": ["tag:axt-router:*"] }
+     ],
+     "groups": {
+       "group:operators": ["alice@team.com", "bob@team.com"]
+     },
+     "ssh": [
+       { "action": "accept",
+         "src": ["group:operators"],
+         "dst": ["tag:axt-router"],
+         "users": ["root"] }
+     ]
+   }
+   ```
+
+   That last `ssh` block lets operators `tailscale ssh root@axt-eagle-1`
+   without distributing SSH keys — Tailscale identity gates the session.
+
+### Per fleet rollout: generate a pre-auth key
+
+Admin console → **Settings → Keys → Generate auth key**:
+
+- **Reusable**: yes (one key enrolls all your routers)
+- **Ephemeral**: no (state must persist across reboots)
+- **Pre-authorized**: yes (skip admin-console approval per device)
+- **Tags**: `tag:axt-router`
+- **Expiration**: cover your deployment window (90 days max)
+
+Save the key — looks like `tskey-auth-xxxxxxxxxx`. **Treat it as a
+secret.** Anyone with it can enroll a device as a tagged router on your
+Tailnet.
+
+### Per router: enrollment (Mesh → Tailscale page)
+
+1. Open `http://192.168.1.1/cgi-bin/luci/admin/mesh/tailscale`
+2. In the **Setup** fieldset:
+   - **Pre-auth key**: paste the key from the previous step
+   - **Hostname**: `axt-eagle-1` (something operator-readable; avoid
+     "OpenWrt" across the fleet)
+   - **Advertise tags**: `tag:axt-router`
+   - **Advertise routes**: `192.168.1.0/24,10.41.0.0/16`
+     (LAN subnet + your mesh L3 subnet)
+   - **Tailscale SSH**: checked (so admins can SSH via Tailnet identity)
+   - **Exit node**: checked only if this is the WAN-bearing router
+     and the team wants to route through your hotspot
+3. Click **Apply**. Within 5 seconds the Status pill flips to **Running**
+   and a Tailnet IPv4 appears.
+4. Verify in the admin console: the router shows under its hostname
+   with the `tag:axt-router` badge, route requests pending.
+5. **Approve routes** in the admin console (Machines → router → Edit
+   route settings). This is a one-time per-router step.
+
+### Day-2 ops
+
+| Operator wants to … | How |
+|---|---|
+| Reach a router's LuCI from anywhere | `https://<tailnet-ip>/cgi-bin/luci/` |
+| SSH into any router | `tailscale ssh root@<tailnet-ip>` (or `<hostname>`) |
+| Reach a mesh peer that has no internet | Through the WAN-bearing router's advertised `10.41.0.0/16` route |
+| Stream RTSP from a router's camera | `rtsp://<tailnet-ip>:8554/cam` in VLC / ATAK |
+| Spin up a TAK Server | Run it on a command-center machine, hit it from field clients via Tailnet IP. Mesh-local CoT multicast (239.2.3.1:6969) still works for nearby peers without needing the server. |
+
+### Off-grid considerations
+
+Tailscale needs internet to **bootstrap** (talk to the coordination plane,
+get DERP keys). Once auth'd, peer-to-peer connections survive intermittent
+WAN. Practical implications:
+
+- Pre-enroll every router **before** deployment so they have cached state.
+  A router that's never auth'd can't talk to the Tailnet at all when WAN
+  goes down.
+- One WAN-bearing router in the field is enough for the whole mesh to be
+  command-center-reachable. If that node loses internet, only the
+  command-center bridge breaks — local mesh comms keep working over 802.11s.
+- DERP relays (Tailscale's TCP fallback) work over surprisingly bad links.
+  Direct peer-to-peer NAT punching fails before DERP does.
+
 ## Subnet layout / address conventions
 
 | Network | Range | Role |
