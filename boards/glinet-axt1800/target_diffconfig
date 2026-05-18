@@ -221,3 +221,14 @@ CONFIG_PACKAGE_luci-app-axt1800-camera=y
 # Does NOT depend on meshtasticd package itself — page exists pre-install so
 # the operator can hit a "Install meshtasticd now" button from the UI.
 CONFIG_PACKAGE_luci-app-axt1800-meshtasticd=y
+
+# --- Mesh status / diagnostic LuCI pages -----------------------------------
+# Three siblings under Mesh → that surface state from tools already in the
+# image. Read-mostly; no new daemons.
+#   - meshstatus: batctl originators + iw station dump → "who can I reach?"
+#   - tailscale:  tailscale status --json + login QR → overlay tunnel state
+#   - cot:        /proc/net/igmp + per-iface mcast counters → "is ATAK
+#                 multicast actually flowing on this mesh?"
+CONFIG_PACKAGE_luci-app-axt1800-meshstatus=y
+CONFIG_PACKAGE_luci-app-axt1800-tailscale=y
+CONFIG_PACKAGE_luci-app-axt1800-cot=y

@@ -1,0 +1,16 @@
+{
+	"luci-app-axt1800-cot": {
+		"description": "Grant read-only access to the ATAK / CoT multicast status page",
+		"read": {
+			"uci": [ "network" ],
+			"file": {
+				"/proc/net/igmp": [ "read" ],
+				"/sys/class/net/bat0/statistics/multicast": [ "read" ],
+				"/sys/class/net/br-lan/statistics/multicast": [ "read" ],
+				"/sys/class/net/phy0-mesh0/statistics/multicast": [ "read" ],
+				"/sys/class/net/wan/statistics/multicast": [ "read" ],
+				"/usr/bin/which smcroute": [ "exec" ]
+			}
+		}
+	}
+}
