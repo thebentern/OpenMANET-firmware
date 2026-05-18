@@ -71,6 +71,16 @@ function ts_pid() {
 	return p != '' ? p : '';
 }
 
+// Best-effort shell-escape for a value that we're about to splice into a
+// `tailscale up --flag="$VALUE"` invocation. The form fields are all
+// constrained / validated upstream of this so the surface is small, but
+// belt-and-suspenders: reject anything outside a strict character set.
+function sanitize_token(s, pattern) {
+	if (s == null || s == '') return '';
+	if (!match(s, pattern)) return '';
+	return s;
+}
+
 // --- POST handler ----------------------------------------------------------
 let posted = http.getenv('REQUEST_METHOD') == 'POST';
 let msg = null;
@@ -79,44 +89,57 @@ const installed = tailscale_installed();
 if (posted && installed) {
 	let action = http.formvalue('action') || '';
 
-	if (action == 'login') {
-		// Kick off a fresh login. Background it so the page returns quickly.
-		// We pipe stdout+stderr to LOGIN_LOG; subsequent renders harvest the
-		// AuthURL from there.
+	if (action == 'login_interactive') {
+		// Kick off a fresh interactive login. Background it so the page
+		// returns quickly. We pipe stdout+stderr to LOGIN_LOG; subsequent
+		// renders harvest the AuthURL from there.
 		unlink(LOGIN_LOG);
 		slurp('(/usr/sbin/tailscale up --reset > ' + LOGIN_LOG + ' 2>&1 &)');
-		// Brief wait so the AuthURL has a chance to land before we re-render.
-		// Anything more than ~1s and the page feels stuck; that's why we use
-		// the "Refresh" button on the surface as a backstop.
 		slurp('sleep 1');
-		msg = 'Login started. Scan the QR code or open the link below.';
+		msg = 'Interactive login started. Scan the QR code or open the link below.';
 	}
 	else if (action == 'down') {
 		slurp('/usr/sbin/tailscale down 2>&1');
-		msg = 'Tailscale brought down. Click Login above to bring it back up.';
+		msg = 'Tailscale brought down. Re-Apply or Login to bring it back up.';
 	}
 	else if (action == 'logout') {
 		slurp('/usr/sbin/tailscale logout 2>&1');
 		unlink(LOGIN_LOG);
 		msg = 'Logged out. The node identity has been forgotten on this Tailnet.';
 	}
-	else if (action == 'advertise-routes') {
-		let routes = http.formvalue('routes') || '';
-		// Best-effort sanitise: comma-separated CIDRs only.
-		if (match(routes, /^[\d\/\.,]+$/)) {
-			slurp('/usr/sbin/tailscale up --advertise-routes="' + routes + '" 2>&1');
-			msg = 'Re-issued tailscale up with routes: ' + routes;
-		} else {
-			msg = 'Routes string rejected. Use comma-separated CIDRs like 192.168.1.0/24,10.41.0.0/16.';
-		}
-	}
-	else if (action == 'exit-node-on') {
-		slurp('/usr/sbin/tailscale up --advertise-exit-node 2>&1');
-		msg = 'Now advertising as exit node. Peers must approve in the admin console.';
-	}
-	else if (action == 'exit-node-off') {
-		slurp('/usr/sbin/tailscale up --advertise-exit-node=false 2>&1');
-		msg = 'No longer advertising as exit node.';
+	else if (action == 'apply') {
+		// Unified settings-apply. tailscale up is stateful — every invocation
+		// specifies the COMPLETE desired state; omitted flags revert to
+		// defaults. So we always re-pass every flag from the form on save,
+		// even if the operator only changed one thing.
+		let auth_key  = sanitize_token(http.formvalue('auth_key'),    /^[A-Za-z0-9_\-]{12,}$/);
+		let hostname  = sanitize_token(http.formvalue('hostname'),    /^[A-Za-z0-9._\-]+$/);
+		let tags      = sanitize_token(http.formvalue('tags'),        /^[A-Za-z0-9_\-:,]+$/);
+		let routes    = sanitize_token(http.formvalue('routes'),      /^[\d\/\.,]+$/);
+		let exit_node = http.formvalue('exit_node') == '1';
+		let ssh       = http.formvalue('ssh')       == '1';
+
+		// Build the command. Order doesn't matter to tailscale, but we
+		// group flags by what they mean for readability in logs.
+		let args = [];
+		if (auth_key != '') push(args, '--authkey="' + auth_key + '"');
+		if (hostname != '') push(args, '--hostname="' + hostname + '"');
+		if (tags     != '') push(args, '--advertise-tags="' + tags + '"');
+		push(args, '--advertise-routes="' + routes + '"');
+		push(args, exit_node ? '--advertise-exit-node' : '--advertise-exit-node=false');
+		push(args, ssh ? '--ssh' : '--ssh=false');
+
+		// tailscale up blocks on interactive auth when --authkey isn't given
+		// AND state is logged-out. We background it the same way as the
+		// interactive login flow so the page returns fast either way.
+		unlink(LOGIN_LOG);
+		let cmd = '(/usr/sbin/tailscale up ' + join(' ', args) + ' > ' + LOGIN_LOG + ' 2>&1 &)';
+		slurp(cmd);
+		slurp('sleep 1');
+
+		msg = auth_key != ''
+			? 'Settings applied with auth key — should come up Running shortly. Click Refresh.'
+			: 'Settings applied. If backend is still NeedsLogin, scan the QR / open the link below.';
 	}
 }
 
@@ -129,8 +152,10 @@ const tailnet     = st && st.CurrentTailnet ? st.CurrentTailnet.Name : '';
 const auth_url    = (st && st.AuthURL) ? st.AuthURL : pending_auth_url();
 const ts4         = (self && self.TailscaleIPs && length(self.TailscaleIPs) > 0)
                     ? self.TailscaleIPs[0] : '';
-const hostname    = self ? self.HostName : '';
-const adv_routes  = (self && self.AdvertisedRoutes) ? join(', ', self.AdvertisedRoutes) : '';
+const cur_hostname    = self ? (self.HostName || '') : '';
+const cur_tags        = (self && self.Tags) ? join(',', self.Tags) : '';
+const adv_routes_csv    = (self && self.AdvertisedRoutes) ? join(',', self.AdvertisedRoutes) : '';
+const adv_routes_pretty = (self && self.AdvertisedRoutes) ? join(', ', self.AdvertisedRoutes) : '';
 const is_exit_node = self ? !!self.ExitNodeOption : false;
 const pid         = installed ? ts_pid() : '';
 
@@ -217,16 +242,20 @@ include('header');
 				{% if (!pid): %}<span class="ts-pill ts-pill-off" style="margin-left:6px;">daemon stopped</span>{% endif %}
 			</div>
 			<dl class="ts-grid">
-				<dt>{{ _('Hostname') }}</dt>      <dd>{{ hostname || '—' }}</dd>
+				<dt>{{ _('Hostname') }}</dt>      <dd>{{ cur_hostname || '—' }}</dd>
 				<dt>{{ _('Tailnet IPv4') }}</dt>  <dd>{{ ts4 || '—' }}</dd>
 				<dt>{{ _('Tailnet') }}</dt>       <dd>{{ tailnet || '—' }}</dd>
-				<dt>{{ _('Advertised routes') }}</dt> <dd>{{ adv_routes || '—' }}</dd>
+				<dt>{{ _('Tags') }}</dt>          <dd>{{ cur_tags || '—' }}</dd>
+				<dt>{{ _('Advertised routes') }}</dt> <dd>{{ adv_routes_pretty || '—' }}</dd>
 				<dt>{{ _('Exit node') }}</dt>     <dd>{{ is_exit_node ? _('Advertising') : _('No') }}</dd>
 			</dl>
 
 			<form method="POST" action="" class="ts-btns" style="margin-top:12px;">
 				{% if (backend == 'NeedsLogin' || backend == 'Stopped'): %}
-					<button type="submit" class="cbi-button cbi-button-action" name="action" value="login">{{ _('Login') }}</button>
+					<button type="submit" class="cbi-button" name="action" value="login_interactive">{{ _('Interactive login (no auth key)') }}</button>
+					<div style="color:#888;font-size:11px;margin-top:4px;">
+						{{ _('Use the Setup form below for non-interactive enrollment via a pre-auth key.') }}
+					</div>
 				{% endif %}
 				{% if (backend == 'Running'): %}
 					<button type="submit" class="cbi-button" name="action" value="down">{{ _('Bring down') }}</button>
@@ -237,7 +266,82 @@ include('header');
 	</fieldset>
 
 	<!-- ============================================================ -->
-	<!-- Section 2: Login flow (only when needed)                        -->
+	<!-- Section 2: Setup (auth + identity + routes + ssh)              -->
+	<!-- Single Apply button re-passes all flags to `tailscale up`      -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('Setup') }}</legend>
+		<div class="cbi-section-descr">
+			{{ _('Bootstrap this router onto your Tailnet (non-interactive via a pre-auth key) or tune settings on an already-authed daemon. Every Apply re-passes the full set of flags to `tailscale up` — that\'s the only safe way to keep settings sticky, because tailscale resets omitted flags to defaults. Read the README\'s \"Tailscale fleet setup\" section for the end-to-end team workflow.') }}
+		</div>
+		<form method="POST" action="">
+		<input type="hidden" name="action" value="apply">
+		<div class="cbi-section-node">
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="cbi-ts-auth-key">{{ _('Pre-auth key') }}</label>
+				<div class="cbi-value-field">
+					<input class="cbi-input-password" id="cbi-ts-auth-key" type="password" name="auth_key"
+						value="" placeholder="tskey-auth-…" style="width:100%;max-width:480px;font-family:Menlo,Consolas,monospace;">
+					<div class="cbi-value-description">
+						{{ _('Generate in Tailscale admin console → Settings → Keys. Recommended flags: Reusable, Pre-authorized, Tags = tag:your-router-tag. Leave blank to use the existing identity (already-authed routers just need this on first enrollment).') }}
+					</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="cbi-ts-hostname">{{ _('Hostname') }}</label>
+				<div class="cbi-value-field">
+					<input class="cbi-input-text" id="cbi-ts-hostname" type="text" name="hostname"
+						value="{{ cur_hostname }}" placeholder="axt-eagle-1" maxlength="63">
+					<div class="cbi-value-description">{{ _('How this router shows in the Tailscale admin console. Default is the system hostname (often "OpenWrt", useless across a fleet). Pick something operator-readable.') }}</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="cbi-ts-tags">{{ _('Advertise tags') }}</label>
+				<div class="cbi-value-field">
+					<input class="cbi-input-text" id="cbi-ts-tags" type="text" name="tags"
+						value="{{ cur_tags }}" placeholder="tag:axt-router">
+					<div class="cbi-value-description">{{ _('Comma-separated, each must start with "tag:". The auth key\'s tagOwners ACL must allow these tags. Ties this device to ACL rules in the admin console (e.g. "tag:axt-router can be reached by group:operators").') }}</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="cbi-ts-routes">{{ _('Advertise routes') }}</label>
+				<div class="cbi-value-field">
+					<input class="cbi-input-text" id="cbi-ts-routes" type="text" name="routes"
+						value="{{ adv_routes_csv }}" placeholder="192.168.1.0/24,10.41.0.0/16">
+					<div class="cbi-value-description">{{ _('Comma-separated CIDRs (no spaces). Typical: LAN subnet + mesh L3 subnet. Tailnet peers can then reach LAN/mesh services through this router. Admin must approve routes once in the admin console.') }}</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="cbi-ts-exit">{{ _('Act as exit node') }}</label>
+				<div class="cbi-value-field">
+					<input class="cbi-input-checkbox" id="cbi-ts-exit" type="checkbox" name="exit_node" value="1"{{ is_exit_node ? ' checked' : '' }}>
+					<div class="cbi-value-description">{{ _('Other Tailnet peers can route all their internet traffic through this router\'s WAN. Useful when this router is the only one with a hotspot — remote ops route via your phone hotspot. Admin approval required.') }}</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="cbi-ts-ssh">{{ _('Tailscale SSH server') }}</label>
+				<div class="cbi-value-field">
+					<input class="cbi-input-checkbox" id="cbi-ts-ssh" type="checkbox" name="ssh" value="1">
+					<div class="cbi-value-description">{{ _('Enable the built-in `tailscale ssh` server. ACL-controlled access without distributing SSH keys — Tailscale identity gates the session. Coexists with dropbear (the regular SSH) on this router. Recommended for fleet ops.') }}</div>
+				</div>
+			</div>
+
+			<div style="margin-top:12px;">
+				<button type="submit" class="cbi-button cbi-button-save">{{ _('Apply') }}</button>
+				<span style="margin-left:1em;color:#bbb;font-size:12px;">{{ _('Re-passes ALL flags to `tailscale up` — the only safe pattern.') }}</span>
+			</div>
+		</div>
+		</form>
+	</fieldset>
+
+	<!-- ============================================================ -->
+	<!-- Section 3: Login flow (only when needed)                       -->
 	<!-- ============================================================ -->
 	{% if (backend == 'NeedsLogin' && auth_url): %}
 	<fieldset class="cbi-section">
@@ -274,7 +378,7 @@ include('header');
 	{% endif %}
 
 	<!-- ============================================================ -->
-	<!-- Section 3: Peers                                               -->
+	<!-- Section 4: Peers                                               -->
 	<!-- ============================================================ -->
 	{% if (backend == 'Running'): %}
 	<fieldset class="cbi-section">
@@ -322,45 +426,6 @@ include('header');
 		</div>
 	</fieldset>
 
-	<!-- ============================================================ -->
-	<!-- Section 4: Subnet routes + exit node                            -->
-	<!-- ============================================================ -->
-	<fieldset class="cbi-section">
-		<legend>{{ _('Subnet routes &amp; exit node') }}</legend>
-		<div class="cbi-section-descr">
-			{{ _('Advertise routes so Tailnet peers can reach LAN-side services (192.168.1.0/24 by default). Advertise as exit node so peers can route all their traffic through this router\'s WAN (useful when on a hotspot). Both require admin-console approval in the Tailscale web UI.') }}
-		</div>
-		<div class="cbi-section-node">
-
-			<div class="cbi-value">
-				<label class="cbi-value-title">{{ _('Advertise routes') }}</label>
-				<div class="cbi-value-field">
-					<form method="POST" action="" style="display:flex;gap:6px;align-items:center;">
-						<input type="hidden" name="action" value="advertise-routes">
-						<input class="cbi-input-text" type="text" name="routes" value="{{ adv_routes }}"
-							placeholder="192.168.1.0/24,10.41.0.0/16" style="flex:1;max-width:380px;">
-						<button type="submit" class="cbi-button">{{ _('Apply') }}</button>
-					</form>
-					<div class="cbi-value-description">{{ _('Comma-separated CIDRs. Empty = stop advertising any subnets.') }}</div>
-				</div>
-			</div>
-
-			<div class="cbi-value">
-				<label class="cbi-value-title">{{ _('Exit node') }}</label>
-				<div class="cbi-value-field">
-					<form method="POST" action="" class="ts-btns">
-						{% if (!is_exit_node): %}
-							<button type="submit" class="cbi-button" name="action" value="exit-node-on">{{ _('Advertise as exit node') }}</button>
-						{% endif %}
-						{% if (is_exit_node): %}
-							<button type="submit" class="cbi-button" name="action" value="exit-node-off">{{ _('Stop advertising as exit node') }}</button>
-						{% endif %}
-					</form>
-				</div>
-			</div>
-
-		</div>
-	</fieldset>
 	{% endif %}
 
 	{% endif %}{# /installed #}
