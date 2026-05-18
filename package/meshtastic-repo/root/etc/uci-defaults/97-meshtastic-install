@@ -46,13 +46,20 @@ trap cleanup EXIT
 log "starting (attempt $(date '+%Y-%m-%d %H:%M:%S'))"
 
 # --- apk update ------------------------------------------------------------
+# Don't gate the rest of the script on apk update's exit code. apk-tools v3
+# returns:
+#   0 — all repos reachable
+#   1 — partial failure (some repos reachable, some not)
+#   9 — total failure (no repos reachable at all)
+# A single broken / 404 repo entry in distfeeds.list (we ship an openmanet
+# placeholder that 404s on downloads.openwrt.org, for example) forces exit
+# 1 even when the meshtastic repo we actually need IS reachable. The
+# `apk info -e meshtasticd` check below is the real verifier — if the
+# daemon package actually landed, the network was good enough.
 apk update > "$TMP" 2>&1
 rc=$?
 emit
-if [ "$rc" -ne 0 ]; then
-	log "apk update failed (exit $rc — no internet?). Will retry on next boot."
-	exit 1
-fi
+log "apk update finished (exit $rc — proceeding to apk add regardless)"
 
 # --- apk add ---------------------------------------------------------------
 apk add $PKGS > "$TMP" 2>&1
@@ -64,8 +71,8 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 # Belt-and-suspenders: even if apk add returns 0, verify the daemon
-# package actually landed on disk. Otherwise we'd delete this script
-# and lose retry-on-next-boot.
+# package actually landed on disk. Catches the "all repos unreachable
+# but apk add still exited 0 from cache" edge case.
 if ! apk info -e meshtasticd > /dev/null 2>&1; then
 	log "apk add returned 0 but meshtasticd is not installed. Will retry on next boot."
 	exit 1
