@@ -1,0 +1,492 @@
+{%
+//
+// AXT-1800 meshtasticd configuration, server-side rendered.
+//
+// Dedicated LuCI page (Mesh → meshtasticd) for setting up the meshtasticd
+// daemon on the router: pick a hardware profile, set MAC-address source,
+// configure the webserver, control the service.
+//
+// meshtasticd reads /etc/meshtasticd/config.yaml first, then merges every
+// /etc/meshtasticd/config.d/*.yaml on top in alphabetical order. We OWN
+// three filenames in config.d/:
+//
+//   00-luci-<profile-name>.yaml   the picked hardware profile (copied
+//                                  from /etc/meshtasticd/available.d/)
+//   99-luci-identity.yaml          General.MACAddressSource override
+//   99-luci-webserver.yaml         Webserver.Port override
+//
+// Anything else in config.d/ is the operator's hand-rolled config — we
+// don't touch it. Saving a fresh selection replaces only the LuCI-owned
+// files; the operator's files stay put.
+//
+
+import { popen, lsdir, readfile, writefile, unlink, access, stat } from 'fs';
+
+const CFG_DIR        = '/etc/meshtasticd/config.d';
+const AVAIL_DIR      = '/etc/meshtasticd/available.d';
+const ID_FILE        = CFG_DIR + '/99-luci-identity.yaml';
+const WEB_FILE       = CFG_DIR + '/99-luci-webserver.yaml';
+const PROFILE_PREFIX = '00-luci-';   // 00-luci-<original-name>.yaml
+
+// --- helpers ---------------------------------------------------------------
+
+// Slurp the output of a shell command. Trim trailing newline. Returns ''
+// on any error. Use sparingly — popen() is slow on this hardware.
+function slurp(cmd) {
+	let fp = popen(cmd, 'r');
+	if (!fp) return '';
+	let out = fp.read('all') || '';
+	fp.close();
+	return trim(out);
+}
+
+// Is the current /etc/init.d/meshtasticd enabled to start at boot?
+function service_enabled() {
+	let fp = popen('/etc/init.d/meshtasticd enabled; echo $?', 'r');
+	if (!fp) return false;
+	let out = fp.read('all') || '';
+	fp.close();
+	return trim(out) == '0';
+}
+
+function service_pid() {
+	let p = slurp('pidof meshtasticd');
+	return p != '' ? p : null;
+}
+
+function meshtasticd_installed() {
+	return slurp('apk info -e meshtasticd 2>/dev/null') != '';
+}
+
+function meshtasticd_version() {
+	// `apk info meshtasticd` first line is "meshtasticd-2.7.15-r1 ..."
+	let line = slurp('apk info meshtasticd 2>/dev/null | head -1');
+	return line;
+}
+
+// Find the currently-active LuCI profile by listing config.d/. We look for
+// the 00-luci-<name>.yaml that our save-handler wrote. Returns the original
+// available.d/ filename (e.g. "lora-meshstick-1262.yaml") or null.
+function active_profile() {
+	let entries = lsdir(CFG_DIR) || [];
+	for (let e in entries) {
+		if (substr(e, 0, length(PROFILE_PREFIX)) == PROFILE_PREFIX)
+			return substr(e, length(PROFILE_PREFIX));
+	}
+	return null;
+}
+
+// List available profiles. We only list top-level .yaml files (skip the
+// platform-specific subdirectories like MUI/, OpenWRT/, femtofox/ — those
+// are bundles that aren't meant to be activated as a single file).
+function available_profiles() {
+	let out = [];
+	let entries = lsdir(AVAIL_DIR) || [];
+	for (let e in entries) {
+		// .yaml suffix only
+		if (substr(e, length(e) - 5, 5) != '.yaml') continue;
+		// must be a regular file, not a directory
+		let st = stat(AVAIL_DIR + '/' + e);
+		if (!st || st.type != 'file') continue;
+		push(out, e);
+	}
+	return sort(out);
+}
+
+// Available network interfaces for MAC-address-source dropdown. Skip
+// `lo` (no useful MAC) and any of our own bridge-internal devices.
+function net_interfaces() {
+	let out = [];
+	let entries = lsdir('/sys/class/net') || [];
+	for (let e in entries) {
+		if (e == 'lo') continue;
+		// Read MAC for display alongside name
+		let mac = readfile('/sys/class/net/' + e + '/address');
+		mac = mac ? trim(mac) : '';
+		push(out, { name: e, mac: mac });
+	}
+	return sort(out, function(a, b) { return a.name < b.name ? -1 : 1; });
+}
+
+// Parse the LuCI identity overlay. Returns { source: ..., address: ... }.
+// We only recognise the two lines we ourselves write — anything else gets
+// ignored (operator's edits remain in their own file).
+function read_identity() {
+	let txt = readfile(ID_FILE);
+	if (!txt) return { source: '', address: '' };
+	let res = { source: '', address: '' };
+	for (let line in split(txt, '\n')) {
+		let m = match(line, /^\s*MACAddressSource:\s*(\S+)/);
+		if (m) res.source = m[1];
+		let m2 = match(line, /^\s*MACAddress:\s*([0-9A-Fa-f:]+)/);
+		if (m2) res.address = m2[1];
+	}
+	return res;
+}
+
+// Same idea for the webserver overlay.
+function read_webserver() {
+	let txt = readfile(WEB_FILE);
+	if (!txt) return { port: '', tls: true };
+	let res = { port: '', tls: true };
+	for (let line in split(txt, '\n')) {
+		let m = match(line, /^\s*Port:\s*(\d+)/);
+		if (m) res.port = m[1];
+		// We encode "TLS disabled" by writing empty SSLKey/SSLCert lines
+		if (match(line, /^\s*#\s*plaintext-only:/)) res.tls = false;
+	}
+	return res;
+}
+
+// Last N log lines, filtered to meshtasticd. Pre-formatted for display.
+function log_tail(n) {
+	let raw = slurp('logread 2>/dev/null | grep -i meshtasticd | tail -' + n);
+	if (raw == '') return [];
+	return split(raw, '\n');
+}
+
+// Remove any existing LuCI profile overlay (00-luci-*.yaml). Used before
+// writing a fresh one — we don't want two profiles fighting in config.d/.
+function clear_profile() {
+	let entries = lsdir(CFG_DIR) || [];
+	for (let e in entries) {
+		if (substr(e, 0, length(PROFILE_PREFIX)) == PROFILE_PREFIX)
+			unlink(CFG_DIR + '/' + e);
+	}
+}
+
+// --- POST handler ----------------------------------------------------------
+let posted = http.getenv('REQUEST_METHOD') == 'POST';
+let msg = null;
+let installed_now = meshtasticd_installed();
+
+if (posted) {
+	let action = http.formvalue('action') || '';
+
+	// Service-control actions: trigger procd, set a banner, no further work.
+	if (action == 'start'   || action == 'stop'    || action == 'restart' ||
+	    action == 'enable'  || action == 'disable') {
+		slurp(sprintf('/etc/init.d/meshtasticd %s 2>&1', action));
+		msg = 'Service "' + action + '" requested.';
+	}
+	// Trigger the first-boot installer (still useful when meshtasticd isn't
+	// installed and the operator has internet now).
+	else if (action == 'install') {
+		// Run synchronously so the page reload shows the actual outcome.
+		// The installer is idempotent + tolerant of partial-failure (per the
+		// fixes in 97-meshtastic-install).
+		if (access('/etc/uci-defaults/97-meshtastic-install', 'x')) {
+			slurp('/etc/uci-defaults/97-meshtastic-install 2>&1');
+		} else {
+			// Already consumed by uci-defaults runner — run the same packages directly.
+			slurp('apk update 2>&1; apk add meshtasticd meshtasticd-web meshtasticd-avahi-service python3-meshtastic 2>&1');
+		}
+		installed_now = meshtasticd_installed();
+		msg = installed_now
+			? 'Install complete. Configure below and start the service.'
+			: 'Install failed. Check the log tail at the bottom of this page; usually means no internet.';
+	}
+	// Save the full config bundle.
+	else if (action == 'save_config') {
+		// --- 1) Hardware profile ---
+		let profile = http.formvalue('profile') || 'none';
+		clear_profile();
+		if (profile != 'none' && profile != '') {
+			let src = readfile(AVAIL_DIR + '/' + profile);
+			if (src) writefile(CFG_DIR + '/' + PROFILE_PREFIX + profile, src);
+		}
+
+		// --- 2) MAC-address source ---
+		let mac_src = http.formvalue('mac_source') || 'auto';
+		let mac_val = http.formvalue('mac_address') || '';
+		unlink(ID_FILE);
+		if (mac_src == 'custom' && length(mac_val) > 0) {
+			writefile(ID_FILE, '# Managed by LuCI mesh → meshtasticd page\nGeneral:\n  MACAddress: ' + mac_val + '\n');
+		} else if (mac_src != 'auto' && mac_src != '') {
+			writefile(ID_FILE, '# Managed by LuCI mesh → meshtasticd page\nGeneral:\n  MACAddressSource: ' + mac_src + '\n');
+		}
+
+		// --- 3) Webserver ---
+		let ws_enabled = http.formvalue('ws_enabled') == '1';
+		let ws_port    = http.formvalue('ws_port') || '9443';
+		let ws_tls     = http.formvalue('ws_tls') == '1';
+		unlink(WEB_FILE);
+		if (ws_enabled) {
+			let yaml = '# Managed by LuCI mesh → meshtasticd page\nWebserver:\n  Port: ' + ws_port + '\n';
+			if (!ws_tls) {
+				// meshtasticd's webserver doesn't have an "off TLS" toggle —
+				// it falls back to plain HTTP if it can't load the cert+key.
+				// Wiping both paths forces that fallback.
+				yaml += '  SSLKey: ""\n  SSLCert: ""\n# plaintext-only: 1\n';
+			}
+			writefile(WEB_FILE, yaml);
+		}
+
+		// Non-blocking restart so the page comes back quickly.
+		popen('(sleep 1 && /etc/init.d/meshtasticd restart >/dev/null 2>&1) &', 'r');
+		msg = 'Configuration saved. meshtasticd restarting…';
+	}
+}
+
+// --- Read state for rendering ----------------------------------------------
+const installed   = installed_now;
+const version     = installed ? meshtasticd_version() : '';
+const pid         = installed ? service_pid()         : null;
+const enabled     = installed ? service_enabled()     : false;
+const profiles    = available_profiles();
+const cur_profile = active_profile();
+const ifaces      = net_interfaces();
+const cur_id      = read_identity();
+const cur_web     = read_webserver();
+const cur_ws_port = cur_web.port != '' ? cur_web.port : '9443';
+const cur_ws_tls  = cur_web.tls;
+const cur_ws_on   = readfile(WEB_FILE) != null;
+const logs        = log_tail(20);
+
+// Decide LAN IP for the webserver link. Same pattern the camera page uses.
+let _lan_ip = (function() {
+	let txt = slurp('uci -q get network.lan.ipaddr');
+	return txt != '' ? txt : '192.168.1.1';
+})();
+if (type(_lan_ip) == 'array') _lan_ip = _lan_ip[0];
+const lan_ip = split(_lan_ip, '/')[0];
+const ws_url = (cur_ws_tls ? 'https://' : 'http://') + lan_ip + ':' + cur_ws_port + '/';
+
+include('header');
+%}
+
+<style>
+	.mt-card        { background:#1c1c1c; border-radius:8px; padding:14px; margin-bottom:1em; }
+	.mt-row         { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+	.mt-pill        { display:inline-block; padding:2px 10px; border-radius:11px; font-size:11px;
+	                   font-weight:600; letter-spacing:0.5px; }
+	.mt-pill-on     { background:#2d6a4f; color:#fff; }
+	.mt-pill-warn   { background:#bf6900; color:#fff; }
+	.mt-pill-off    { background:#444;    color:#bbb; }
+	.mt-btns        { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+	.mt-log         { background:#0f0f0f; color:#ddd; padding:10px; border-radius:6px;
+	                   font-family:Menlo,Consolas,monospace; font-size:11.5px;
+	                   max-height:300px; overflow:auto; white-space:pre-wrap; }
+	.mt-empty       { color:#888; font-style:italic; padding:18px; text-align:center; }
+	.mt-iface-mac   { color:#888; font-family:Menlo,Consolas,monospace; font-size:11px; }
+</style>
+
+<div class="cbi-map">
+	<h2 name="content">{{ _('meshtasticd configuration') }}</h2>
+	<div class="cbi-map-descr">
+		{{ _('Configure the meshtasticd daemon — pick the hardware profile matching your LoRa module, set the MAC-address source, manage the web UI, and control the service. Detailed protocol settings (region, channels, primary key) live in meshtasticd\'s own web UI which this page links to.') }}
+	</div>
+
+	{% if (msg): %}
+	<div class="alert-message notice" style="background:#2d6a4f;color:#fff;padding:10px;border-radius:6px;margin:1em 0;">{{ msg }}</div>
+	{% endif %}
+
+	{% if (!installed): %}
+	<fieldset class="cbi-section">
+		<legend>{{ _('Service status') }}</legend>
+		<div class="mt-card">
+			<p>{{ _('meshtasticd is not installed yet. It ships from the Meshtastic prebuilt apk repo (already configured on this image). The router needs internet for first install — connect a hotspot to the WAN port, or run the wizard\'s mgmt-AP and a phone hotspot.') }}</p>
+			<form method="POST" action="" style="margin-top:1em;">
+				<input type="hidden" name="action" value="install">
+				<button type="submit" class="cbi-button cbi-button-action">{{ _('Install meshtasticd now') }}</button>
+			</form>
+		</div>
+	</fieldset>
+	{% endif %}
+
+	{% if (installed): %}
+
+	<!-- ============================================================ -->
+	<!-- Section 1: Service status + control                            -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('Service status') }}</legend>
+		<div class="mt-card">
+			<div class="mt-row" style="margin-bottom:8px;">
+				<strong>{{ _('Running:') }}</strong>
+				{% if (pid): %}<span class="mt-pill mt-pill-on">{{ _('PID') }} {{ pid }}</span>{% endif %}
+				{% if (!pid): %}<span class="mt-pill mt-pill-off">{{ _('STOPPED') }}</span>{% endif %}
+				<strong style="margin-left:1em;">{{ _('At boot:') }}</strong>
+				{% if (enabled): %}<span class="mt-pill mt-pill-on">{{ _('ENABLED') }}</span>{% endif %}
+				{% if (!enabled): %}<span class="mt-pill mt-pill-off">{{ _('DISABLED') }}</span>{% endif %}
+			</div>
+			<div style="color:#bbb;font-size:12px;margin-bottom:8px;">{{ version }}</div>
+
+			<form method="POST" action="" class="mt-btns">
+				{% if (pid): %}
+					<button type="submit" class="cbi-button"               name="action" value="stop">{{ _('Stop') }}</button>
+					<button type="submit" class="cbi-button"               name="action" value="restart">{{ _('Restart') }}</button>
+				{% endif %}
+				{% if (!pid): %}
+					<button type="submit" class="cbi-button cbi-button-action" name="action" value="start">{{ _('Start') }}</button>
+				{% endif %}
+				{% if (enabled): %}
+					<button type="submit" class="cbi-button"               name="action" value="disable">{{ _('Disable at boot') }}</button>
+				{% endif %}
+				{% if (!enabled): %}
+					<button type="submit" class="cbi-button"               name="action" value="enable">{{ _('Enable at boot') }}</button>
+				{% endif %}
+			</form>
+
+			{% if (enabled && !pid): %}
+				<div style="margin-top:10px;padding:10px;background:#3a2a00;color:#ffc;border-radius:6px;font-size:12px;">
+					{{ _('Daemon is enabled but not running. Most common cause: no LoRa hardware attached, so meshtasticd exits 1 and procd parks it after 5 quick retries. Pick a hardware profile below that matches your module, plug it in, then click Start.') }}
+				</div>
+			{% endif %}
+		</div>
+	</fieldset>
+
+	<form method="POST" action="">
+	<input type="hidden" name="action" value="save_config">
+
+	<!-- ============================================================ -->
+	<!-- Section 2: Hardware profile                                    -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('Hardware profile') }}</legend>
+		<div class="cbi-section-descr">
+			{{ _('Pick the YAML matching your LoRa module. The file is copied from /etc/meshtasticd/available.d/ into /etc/meshtasticd/config.d/ on save. Most operators DO NOT need to edit config.yaml directly — the profile fully describes the radio.') }}
+		</div>
+		<div class="cbi-section-node">
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="cbi-profile">{{ _('Active profile') }}</label>
+				<div class="cbi-value-field">
+					<select class="cbi-input-select" id="cbi-profile" name="profile">
+						<option value="none"{{ !cur_profile ? ' selected' : '' }}>{{ _('(none — daemon autodetects, falls back to Lora.Module: auto)') }}</option>
+						{% for (p in profiles): %}
+							<option value="{{ p }}"{{ p == cur_profile ? ' selected' : '' }}>{{ p }}</option>
+						{% endfor %}
+					</select>
+					<div class="cbi-value-description">
+						{% if (cur_profile): %}
+							{{ _('Currently active:') }} <code>{{ cur_profile }}</code>
+						{% endif %}
+						{% if (!cur_profile): %}
+							{{ _('No LuCI profile active. The daemon falls back to autodetect against config.yaml\'s Lora.Module setting. Pick a profile if autodetect doesn\'t recognise your radio.') }}
+						{% endif %}
+					</div>
+				</div>
+			</div>
+
+		</div>
+	</fieldset>
+
+	<!-- ============================================================ -->
+	<!-- Section 3: Identity (MAC address source)                       -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('Node identity') }}</legend>
+		<div class="cbi-section-descr">
+			{{ _('meshtasticd derives the node ID from a MAC address. By default it picks the first interface it can find — which can change across reboots if interface naming flips. Pin it to a specific interface (typically eth0 or bat0) for a stable node identity. Custom override lets you supply an explicit MAC.') }}
+		</div>
+		<div class="cbi-section-node">
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="cbi-mac-source">{{ _('MAC source') }}</label>
+				<div class="cbi-value-field">
+					<select class="cbi-input-select" id="cbi-mac-source" name="mac_source">
+						<option value="auto"{{ (cur_id.source == '' && cur_id.address == '') ? ' selected' : '' }}>{{ _('Auto (meshtasticd picks)') }}</option>
+						{% for (i in ifaces): %}
+							<option value="{{ i.name }}"{{ i.name == cur_id.source ? ' selected' : '' }}>{{ i.name }}{% if (i.mac): %} — <span class="mt-iface-mac">{{ i.mac }}</span>{% endif %}</option>
+						{% endfor %}
+						<option value="custom"{{ cur_id.address != '' ? ' selected' : '' }}>{{ _('Custom MAC override') }}</option>
+					</select>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="cbi-mac-address">{{ _('Custom MAC') }}</label>
+				<div class="cbi-value-field">
+					<input class="cbi-input-text" id="cbi-mac-address" type="text" name="mac_address"
+						value="{{ cur_id.address }}" placeholder="AA:BB:CC:DD:EE:FF" maxlength="17">
+					<div class="cbi-value-description">{{ _('Only used when MAC source is set to "Custom MAC override". Format: six hex pairs separated by colons. Pick something unique across your nodes.') }}</div>
+				</div>
+			</div>
+
+		</div>
+	</fieldset>
+
+	<!-- ============================================================ -->
+	<!-- Section 4: Web UI                                              -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('Web UI') }}</legend>
+		<div class="cbi-section-descr">
+			{{ _('meshtasticd ships its own web UI for full protocol configuration — channels, primary key, LoRa region, node DB, message log. This page only manages the daemon\'s plumbing; everything channel-related lives in the meshtasticd web UI.') }}
+		</div>
+		<div class="cbi-section-node">
+
+			<div class="cbi-value">
+				<label class="cbi-value-title">{{ _('Open the web UI') }}</label>
+				<div class="cbi-value-field">
+					{% if (pid && cur_ws_on): %}
+						<a class="cbi-button cbi-button-action" href="{{ ws_url }}" target="_blank">{{ ws_url }}</a>
+					{% endif %}
+					{% if (!(pid && cur_ws_on)): %}
+						<a class="cbi-button" href="{{ ws_url }}" target="_blank">{{ ws_url }}</a>
+						<div class="cbi-value-description" style="margin-top:6px;color:#bfa;">
+							{{ pid ? _('Webserver overlay is OFF. Toggle below + Save to enable, then this link opens the UI.')
+							      : _('Daemon is stopped. Start it (top of page) then this link opens the UI.') }}
+						</div>
+					{% endif %}
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="cbi-ws-enabled">{{ _('Webserver overlay') }}</label>
+				<div class="cbi-value-field">
+					<input class="cbi-input-checkbox" id="cbi-ws-enabled" type="checkbox" name="ws_enabled" value="1"{{ cur_ws_on ? ' checked' : '' }}>
+					<div class="cbi-value-description">{{ _('Off = use meshtasticd defaults from config.yaml (port 9443, TLS on). On = override port and TLS below.') }}</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="cbi-ws-port">{{ _('Port') }}</label>
+				<div class="cbi-value-field">
+					<input class="cbi-input-text" id="cbi-ws-port" type="number" name="ws_port" value="{{ cur_ws_port }}" min="1" max="65535">
+					<div class="cbi-value-description">{{ _('Default 9443. Pick something other than 80/443 to avoid conflict with uhttpd (which serves this LuCI page).') }}</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="cbi-ws-tls">{{ _('TLS (HTTPS)') }}</label>
+				<div class="cbi-value-field">
+					<input class="cbi-input-checkbox" id="cbi-ws-tls" type="checkbox" name="ws_tls" value="1"{{ cur_ws_tls ? ' checked' : '' }}>
+					<div class="cbi-value-description">{{ _('Use HTTPS with a self-signed certificate (meshtasticd generates one if missing). Off = plain HTTP — handy on a trusted LAN, easier to script against.') }}</div>
+				</div>
+			</div>
+
+		</div>
+	</fieldset>
+
+	<div style="margin:1em 0;">
+		<button type="submit" class="cbi-button cbi-button-save">{{ _('Save & Apply') }}</button>
+		<span style="margin-left:1em;color:#bbb;">{{ _('Daemon restarts automatically on save.') }}</span>
+	</div>
+
+	</form>
+
+	<!-- ============================================================ -->
+	<!-- Section 5: Recent activity                                     -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('Recent activity') }}</legend>
+		<div class="cbi-section-descr">
+			{{ _('Last 20 log lines from meshtasticd. Reload the page to refresh — there is no auto-poll because the log isn\'t the source of truth (the daemon\'s own UI is).') }}
+		</div>
+		<div class="cbi-section-node">
+			{% if (length(logs) == 0): %}
+				<div class="mt-empty">{{ _('No meshtasticd log lines yet. If the daemon is enabled but you see nothing here, the process may be exiting too fast for logread to catch (typical of "no LoRa hardware" loops).') }}</div>
+			{% endif %}
+			{% if (length(logs) > 0): %}
+				<div class="mt-log">{% for (l in logs): %}{{ l }}
+{% endfor %}</div>
+			{% endif %}
+		</div>
+	</fieldset>
+
+	{% endif %}{# /installed #}
+</div>
+
+{% include('footer'); %}

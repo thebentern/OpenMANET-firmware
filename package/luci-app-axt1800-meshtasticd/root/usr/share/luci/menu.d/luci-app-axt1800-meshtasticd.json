@@ -1,0 +1,13 @@
+{
+	"admin/mesh/meshtasticd": {
+		"title": "meshtasticd",
+		"order": 30,
+		"action": {
+			"type": "template",
+			"path": "network/axt1800-meshtasticd"
+		},
+		"depends": {
+			"acl": [ "luci-app-axt1800-meshtasticd" ]
+		}
+	}
+}
