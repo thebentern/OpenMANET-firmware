@@ -1,0 +1,389 @@
+{%
+//
+// AXT-1800 Tailscale dashboard, server-side rendered.
+//
+// Surfaces tailscale state in a LuCI page so operators don't have to SSH
+// just to check tunnel status or kick a login. The headline use case is
+// "bridge the local mesh to a remote command center via a phone hotspot" —
+// for that, the most important affordance is the login-QR flow: scan on
+// phone, sign into the Tailnet, peer is added.
+//
+// Data sources:
+//   - `tailscale status --json`         — full state (parsed via ucode json())
+//   - `tailscale ip -4`                 — Tailnet IPv4 quick read
+//   - `pidof tailscaled`                — daemon-up check
+//   - /tmp/ts-login.log                 — stdout from a backgrounded
+//                                          `tailscale up`, used to harvest
+//                                          the AuthURL during NeedsLogin
+//
+// POST actions:
+//   action=login         backgrounded `tailscale up &` → AuthURL surfaces
+//   action=down          `tailscale down`              → backend Stopped
+//   action=logout        `tailscale logout`            → forget keys
+//   action=advertise     `tailscale up --advertise-routes=...`
+//   action=exit-node     `tailscale up --advertise-exit-node`
+//
+
+import { popen, readfile, unlink } from 'fs';
+
+const LOGIN_LOG = '/tmp/ts-login.log';
+
+// --- helpers ---------------------------------------------------------------
+
+function slurp(cmd) {
+	let fp = popen(cmd, 'r');
+	if (!fp) return '';
+	let out = fp.read('all') || '';
+	fp.close();
+	return trim(out);
+}
+
+function tailscale_installed() {
+	return slurp('which tailscale') != '';
+}
+
+// `tailscale status --json` returns a fully-formed StatusInfo blob even when
+// the daemon is logged out (BackendState=NeedsLogin). When the daemon is
+// stopped entirely, exit code is non-zero — we still get reasonable defaults.
+function tailscale_status() {
+	let raw = slurp('tailscale status --json 2>/dev/null');
+	if (raw == '') return null;
+	try {
+		return json(raw);
+	} catch (e) {
+		return null;
+	}
+}
+
+// Best-effort extract an AuthURL from a backgrounded `tailscale up` run.
+// tailscale prints the URL on stdout; we capture to LOGIN_LOG. The first
+// post-action page-load may not see it yet (race) — the user just clicks
+// Refresh and it shows up.
+function pending_auth_url() {
+	let txt = readfile(LOGIN_LOG);
+	if (!txt) return '';
+	let m = match(txt, /(https?:\/\/login\.tailscale\.com\/[^\s"]+)/);
+	return m ? m[1] : '';
+}
+
+function ts_pid() {
+	let p = slurp('pidof tailscaled');
+	return p != '' ? p : '';
+}
+
+// --- POST handler ----------------------------------------------------------
+let posted = http.getenv('REQUEST_METHOD') == 'POST';
+let msg = null;
+const installed = tailscale_installed();
+
+if (posted && installed) {
+	let action = http.formvalue('action') || '';
+
+	if (action == 'login') {
+		// Kick off a fresh login. Background it so the page returns quickly.
+		// We pipe stdout+stderr to LOGIN_LOG; subsequent renders harvest the
+		// AuthURL from there.
+		unlink(LOGIN_LOG);
+		slurp('(/usr/sbin/tailscale up --reset > ' + LOGIN_LOG + ' 2>&1 &)');
+		// Brief wait so the AuthURL has a chance to land before we re-render.
+		// Anything more than ~1s and the page feels stuck; that's why we use
+		// the "Refresh" button on the surface as a backstop.
+		slurp('sleep 1');
+		msg = 'Login started. Scan the QR code or open the link below.';
+	}
+	else if (action == 'down') {
+		slurp('/usr/sbin/tailscale down 2>&1');
+		msg = 'Tailscale brought down. Click Login above to bring it back up.';
+	}
+	else if (action == 'logout') {
+		slurp('/usr/sbin/tailscale logout 2>&1');
+		unlink(LOGIN_LOG);
+		msg = 'Logged out. The node identity has been forgotten on this Tailnet.';
+	}
+	else if (action == 'advertise-routes') {
+		let routes = http.formvalue('routes') || '';
+		// Best-effort sanitise: comma-separated CIDRs only.
+		if (match(routes, /^[\d\/\.,]+$/)) {
+			slurp('/usr/sbin/tailscale up --advertise-routes="' + routes + '" 2>&1');
+			msg = 'Re-issued tailscale up with routes: ' + routes;
+		} else {
+			msg = 'Routes string rejected. Use comma-separated CIDRs like 192.168.1.0/24,10.41.0.0/16.';
+		}
+	}
+	else if (action == 'exit-node-on') {
+		slurp('/usr/sbin/tailscale up --advertise-exit-node 2>&1');
+		msg = 'Now advertising as exit node. Peers must approve in the admin console.';
+	}
+	else if (action == 'exit-node-off') {
+		slurp('/usr/sbin/tailscale up --advertise-exit-node=false 2>&1');
+		msg = 'No longer advertising as exit node.';
+	}
+}
+
+// --- gather state ----------------------------------------------------------
+const st          = installed ? tailscale_status() : null;
+const backend     = st ? st.BackendState : 'Unknown';
+const self        = st ? st.Self : null;
+const peers_dict  = st && st.Peer ? st.Peer : {};
+const tailnet     = st && st.CurrentTailnet ? st.CurrentTailnet.Name : '';
+const auth_url    = (st && st.AuthURL) ? st.AuthURL : pending_auth_url();
+const ts4         = (self && self.TailscaleIPs && length(self.TailscaleIPs) > 0)
+                    ? self.TailscaleIPs[0] : '';
+const hostname    = self ? self.HostName : '';
+const adv_routes  = (self && self.AdvertisedRoutes) ? join(', ', self.AdvertisedRoutes) : '';
+const is_exit_node = self ? !!self.ExitNodeOption : false;
+const pid         = installed ? ts_pid() : '';
+
+// Stable peer list (dict → array, sorted by HostName)
+let peers = [];
+if (peers_dict) {
+	for (let k in peers_dict) {
+		let p = peers_dict[k];
+		push(peers, p);
+	}
+	peers = sort(peers, function(a, b) {
+		return (a.HostName || '') < (b.HostName || '') ? -1 : 1;
+	});
+}
+
+// Backend → pill colour
+function backend_pill(state) {
+	if (state == 'Running')         return 'ts-pill-on';
+	if (state == 'NeedsLogin')      return 'ts-pill-warn';
+	if (state == 'NeedsMachineAuth')return 'ts-pill-warn';
+	return 'ts-pill-off';
+}
+
+include('header');
+%}
+
+<style>
+	.ts-card       { background:#1c1c1c; border-radius:8px; padding:14px; margin-bottom:1em; }
+	.ts-pill       { display:inline-block; padding:2px 10px; border-radius:11px; font-size:11px;
+	                  font-weight:600; letter-spacing:0.5px; }
+	.ts-pill-on    { background:#2d6a4f; color:#fff; }
+	.ts-pill-warn  { background:#bf6900; color:#fff; }
+	.ts-pill-off   { background:#444;    color:#bbb; }
+	.ts-grid       { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:13px; }
+	.ts-grid dt    { color:#bbb; }
+	.ts-grid dd    { color:#fff; font-family:Menlo,Consolas,monospace; font-size:12.5px; margin:0; }
+	.ts-tbl th     { text-align:left; padding:6px 8px; background:#222; color:#bbb; font-size:11.5px;
+	                  font-weight:600; letter-spacing:0.5px; }
+	.ts-tbl td     { padding:6px 8px; font-family:Menlo,Consolas,monospace; font-size:12px; }
+	.ts-tbl tr+tr td { border-top:1px solid #2a2a2a; }
+	.ts-auth-card  { background:#1c1c1c; border-radius:8px; padding:16px; display:flex; gap:20px; align-items:center; }
+	.ts-empty      { color:#888; font-style:italic; padding:18px; text-align:center; }
+	.ts-online     { color:#7cd07c; }
+	.ts-offline    { color:#888; }
+	.ts-self       { background:#1a2a1a; }
+	.ts-btns       { display:flex; gap:6px; flex-wrap:wrap; }
+</style>
+
+<div class="cbi-map">
+	<h2 name="content">{{ _('Tailscale') }}</h2>
+	<div class="cbi-map-descr">
+		{{ _('Tailscale tunnel state — sign in, see your Tailnet peers, advertise the LAN subnet, act as an exit node. The headline operator workflow is the login-QR card below: scan with a phone, sign in, this router joins the Tailnet. Detailed admin (ACLs, MagicDNS, etc.) lives in the Tailscale web console.') }}
+		<form method="GET" action="" style="display:inline-block;margin-left:1em;">
+			<button type="submit" class="cbi-button">{{ _('Refresh') }}</button>
+		</form>
+	</div>
+
+	{% if (msg): %}
+	<div class="alert-message notice" style="background:#2d6a4f;color:#fff;padding:10px;border-radius:6px;margin:1em 0;">{{ msg }}</div>
+	{% endif %}
+
+	{% if (!installed): %}
+	<fieldset class="cbi-section">
+		<legend>{{ _('Tailscale not installed') }}</legend>
+		<div class="ts-card">
+			<p>{{ _('The `tailscale` binary is not in this image. Install it via:') }}</p>
+			<pre style="background:#0f0f0f;padding:10px;border-radius:6px;color:#ddd;">apk update &amp;&amp; apk add tailscale</pre>
+		</div>
+	</fieldset>
+	{% endif %}
+
+	{% if (installed): %}
+
+	<!-- ============================================================ -->
+	<!-- Section 1: Status                                              -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('Status') }}</legend>
+		<div class="ts-card">
+			<div style="margin-bottom:10px;">
+				<strong>{{ _('Backend:') }}</strong>
+				<span class="ts-pill {{ backend_pill(backend) }}">{{ backend }}</span>
+				{% if (pid): %}<span class="ts-pill ts-pill-on" style="margin-left:6px;">daemon PID {{ pid }}</span>{% endif %}
+				{% if (!pid): %}<span class="ts-pill ts-pill-off" style="margin-left:6px;">daemon stopped</span>{% endif %}
+			</div>
+			<dl class="ts-grid">
+				<dt>{{ _('Hostname') }}</dt>      <dd>{{ hostname || '—' }}</dd>
+				<dt>{{ _('Tailnet IPv4') }}</dt>  <dd>{{ ts4 || '—' }}</dd>
+				<dt>{{ _('Tailnet') }}</dt>       <dd>{{ tailnet || '—' }}</dd>
+				<dt>{{ _('Advertised routes') }}</dt> <dd>{{ adv_routes || '—' }}</dd>
+				<dt>{{ _('Exit node') }}</dt>     <dd>{{ is_exit_node ? _('Advertising') : _('No') }}</dd>
+			</dl>
+
+			<form method="POST" action="" class="ts-btns" style="margin-top:12px;">
+				{% if (backend == 'NeedsLogin' || backend == 'Stopped'): %}
+					<button type="submit" class="cbi-button cbi-button-action" name="action" value="login">{{ _('Login') }}</button>
+				{% endif %}
+				{% if (backend == 'Running'): %}
+					<button type="submit" class="cbi-button" name="action" value="down">{{ _('Bring down') }}</button>
+					<button type="submit" class="cbi-button" name="action" value="logout">{{ _('Logout (forget identity)') }}</button>
+				{% endif %}
+			</form>
+		</div>
+	</fieldset>
+
+	<!-- ============================================================ -->
+	<!-- Section 2: Login flow (only when needed)                        -->
+	<!-- ============================================================ -->
+	{% if (backend == 'NeedsLogin' && auth_url): %}
+	<fieldset class="cbi-section">
+		<legend>{{ _('Sign in to your Tailnet') }}</legend>
+		<div class="cbi-section-descr">
+			{{ _('Scan with a phone, or click the link to open in this browser. After signing in, click Refresh — the status pill should flip to Running.') }}
+		</div>
+		<div class="cbi-section-node">
+			<div class="ts-auth-card">
+				<canvas id="ts-auth-qr" width="200" height="200" style="background:#fff;border-radius:4px;"></canvas>
+				<div style="flex:1;">
+					<a href="{{ auth_url }}" target="_blank"
+					   class="cbi-button cbi-button-action" style="display:inline-block;">
+						{{ _('Open sign-in page') }}
+					</a>
+					<div id="ts-auth-url" style="font-family:Menlo,Consolas,monospace;font-size:11px;color:#aaa;
+					            margin-top:10px;word-break:break-all;">{{ auth_url }}</div>
+					<form method="GET" action="" style="margin-top:14px;">
+						<button type="submit" class="cbi-button">{{ _("I've signed in — refresh") }}</button>
+					</form>
+				</div>
+			</div>
+		</div>
+	</fieldset>
+	{% endif %}
+
+	{% if (backend == 'NeedsLogin' && !auth_url): %}
+	<fieldset class="cbi-section">
+		<legend>{{ _('Sign in to your Tailnet') }}</legend>
+		<div class="ts-card">
+			<p>{{ _('No auth URL pending. Click Login above to kick off a fresh sign-in flow.') }}</p>
+		</div>
+	</fieldset>
+	{% endif %}
+
+	<!-- ============================================================ -->
+	<!-- Section 3: Peers                                               -->
+	<!-- ============================================================ -->
+	{% if (backend == 'Running'): %}
+	<fieldset class="cbi-section">
+		<legend>{{ _('Tailnet peers') }}</legend>
+		<div class="cbi-section-descr">
+			{{ _('Every node on this Tailnet. "Online" = had a handshake recently. Tap a peer\'s IP into your client/SSH/RTSP URL to reach it through the tunnel.') }}
+		</div>
+		<div class="cbi-section-node">
+			{% if (length(peers) == 0): %}
+				<div class="ts-empty">{{ _('No peers visible yet. Either you are the only node on this Tailnet, or DERP hasn\'t finished discovery.') }}</div>
+			{% endif %}
+			{% if (length(peers) > 0): %}
+				<table class="ts-tbl" style="width:100%;">
+					<thead>
+						<tr>
+							<th>{{ _('Hostname') }}</th>
+							<th>{{ _('OS') }}</th>
+							<th>{{ _('Tailnet IP') }}</th>
+							<th>{{ _('Online') }}</th>
+							<th>{{ _('Last seen') }}</th>
+						</tr>
+					</thead>
+					<tbody>
+					{% if (self): %}
+						<tr class="ts-self">
+							<td><strong>{{ self.HostName }} ({{ _('this node') }})</strong></td>
+							<td>{{ self.OS }}</td>
+							<td>{{ ts4 }}</td>
+							<td class="ts-online">●</td>
+							<td>—</td>
+						</tr>
+					{% endif %}
+					{% for (p in peers): %}
+						<tr>
+							<td>{{ p.HostName || '—' }}</td>
+							<td>{{ p.OS || '—' }}</td>
+							<td>{{ (p.TailscaleIPs && length(p.TailscaleIPs) > 0) ? p.TailscaleIPs[0] : '—' }}</td>
+							<td class="{{ p.Online ? 'ts-online' : 'ts-offline' }}">{% if (p.Online): %}●{% endif %}{% if (!p.Online): %}○{% endif %}</td>
+							<td>{{ p.LastSeen || '—' }}</td>
+						</tr>
+					{% endfor %}
+					</tbody>
+				</table>
+			{% endif %}
+		</div>
+	</fieldset>
+
+	<!-- ============================================================ -->
+	<!-- Section 4: Subnet routes + exit node                            -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('Subnet routes &amp; exit node') }}</legend>
+		<div class="cbi-section-descr">
+			{{ _('Advertise routes so Tailnet peers can reach LAN-side services (192.168.1.0/24 by default). Advertise as exit node so peers can route all their traffic through this router\'s WAN (useful when on a hotspot). Both require admin-console approval in the Tailscale web UI.') }}
+		</div>
+		<div class="cbi-section-node">
+
+			<div class="cbi-value">
+				<label class="cbi-value-title">{{ _('Advertise routes') }}</label>
+				<div class="cbi-value-field">
+					<form method="POST" action="" style="display:flex;gap:6px;align-items:center;">
+						<input type="hidden" name="action" value="advertise-routes">
+						<input class="cbi-input-text" type="text" name="routes" value="{{ adv_routes }}"
+							placeholder="192.168.1.0/24,10.41.0.0/16" style="flex:1;max-width:380px;">
+						<button type="submit" class="cbi-button">{{ _('Apply') }}</button>
+					</form>
+					<div class="cbi-value-description">{{ _('Comma-separated CIDRs. Empty = stop advertising any subnets.') }}</div>
+				</div>
+			</div>
+
+			<div class="cbi-value">
+				<label class="cbi-value-title">{{ _('Exit node') }}</label>
+				<div class="cbi-value-field">
+					<form method="POST" action="" class="ts-btns">
+						{% if (!is_exit_node): %}
+							<button type="submit" class="cbi-button" name="action" value="exit-node-on">{{ _('Advertise as exit node') }}</button>
+						{% endif %}
+						{% if (is_exit_node): %}
+							<button type="submit" class="cbi-button" name="action" value="exit-node-off">{{ _('Stop advertising as exit node') }}</button>
+						{% endif %}
+					</form>
+				</div>
+			</div>
+
+		</div>
+	</fieldset>
+	{% endif %}
+
+	{% endif %}{# /installed #}
+</div>
+
+{% if (backend == 'NeedsLogin' && auth_url): %}
+<script src="/luci-static/resources/axt1800-camera/qrious.min.js"></script>
+<script>
+(function() {
+	var canvas = document.getElementById('ts-auth-qr');
+	var urlEl  = document.getElementById('ts-auth-url');
+	if (canvas && urlEl && typeof QRious !== 'undefined') {
+		new QRious({
+			element: canvas,
+			value: urlEl.textContent.trim(),
+			size: 200,
+			level: 'M',
+			foreground: '#000',
+			background: '#fff'
+		});
+	}
+})();
+</script>
+{% endif %}
+
+{% include('footer'); %}

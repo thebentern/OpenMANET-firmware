@@ -1,0 +1,24 @@
+{
+	"luci-app-axt1800-tailscale": {
+		"description": "Grant access to the AXT-1800 Tailscale dashboard",
+		"read": {
+			"file": {
+				"/usr/sbin/tailscale status --json": [ "exec" ],
+				"/usr/sbin/tailscale ip -4": [ "exec" ],
+				"/usr/bin/pidof tailscaled": [ "exec" ],
+				"/usr/bin/pidof tailscale": [ "exec" ],
+				"/tmp/ts-login.log": [ "read" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/etc/init.d/tailscale start": [ "exec" ],
+				"/etc/init.d/tailscale stop": [ "exec" ],
+				"/etc/init.d/tailscale restart": [ "exec" ],
+				"/usr/sbin/tailscale up *": [ "exec" ],
+				"/usr/sbin/tailscale down": [ "exec" ],
+				"/usr/sbin/tailscale logout": [ "exec" ]
+			}
+		}
+	}
+}
