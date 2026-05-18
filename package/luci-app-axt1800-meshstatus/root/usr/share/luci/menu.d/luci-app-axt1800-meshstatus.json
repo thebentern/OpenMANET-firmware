@@ -1,0 +1,13 @@
+{
+	"admin/mesh/status": {
+		"title": "Status",
+		"order": 5,
+		"action": {
+			"type": "template",
+			"path": "network/axt1800-meshstatus"
+		},
+		"depends": {
+			"acl": [ "luci-app-axt1800-meshstatus" ]
+		}
+	}
+}
