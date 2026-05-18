@@ -15,6 +15,17 @@ A configured AXT-1800 ends up with:
 - `openmanetd` — OpenMANET management daemon + web UI (8080/8081/8087)
 - `tailscale` + `kmod-tun`
 - batman-adv kernel module + `batctl`
+- `meshtastic-repo` — configures the official Meshtastic apk repository
+  (`https://openwrt.meshtastic.org/`) + its signing key, plus a
+  uci-defaults script that does a best-effort `apk add meshtasticd
+  meshtasticd-web meshtasticd-avahi-service python3-meshtastic` on
+  first boot. If the router has internet at boot, the daemon
+  installs and auto-starts. If not, the install retries every
+  subsequent boot until it succeeds — or operators can install
+  manually any time via the same one-liner. Runtime deps
+  (`avahi-daemon`, `libgpiod`, `libyaml-cpp`, `libuv`, `libusb-1.0`,
+  `python3`, etc.) are pre-installed in the image so the first-boot
+  fetch is small.
 - `v4l2rtspserver` + `kmod-video-uvc` + `v4l-utils` — plug a UVC USB
   webcam into the router and the mesh wizard's "USB camera → RTSP
   stream" section (or the dedicated **Network → Camera** page) turns
