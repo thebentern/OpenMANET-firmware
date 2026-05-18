@@ -19,13 +19,44 @@ A configured AXT-1800 ends up with:
   (`https://openwrt.meshtastic.org/`) + its signing key, plus a
   uci-defaults script that does a best-effort `apk add meshtasticd
   meshtasticd-web meshtasticd-avahi-service python3-meshtastic` on
-  first boot. If the router has internet at boot, the daemon
-  installs and auto-starts. If not, the install retries every
+  first boot. If the router has internet at boot, the four packages
+  install and the daemon is enabled. If not, the install retries every
   subsequent boot until it succeeds — or operators can install
   manually any time via the same one-liner. Runtime deps
   (`avahi-daemon`, `libgpiod`, `libyaml-cpp`, `libuv`, `libusb-1.0`,
   `python3`, etc.) are pre-installed in the image so the first-boot
   fetch is small.
+
+  **Bringing up a LoRa radio.** Without a LoRa stick attached,
+  `meshtasticd` autoconfs for hardware, finds none, exits non-zero,
+  and procd respawns it about 5 times before giving up — the daemon
+  is **enabled but not running** in this state, which is the expected
+  "no hardware yet" idle. To actually bring it up:
+
+  ```sh
+  # 1. Plug in a LoRa stick (Heltec / RAK / MeshAdv / pinedio / etc.)
+  # 2. Pick the matching profile and activate it:
+  ls /etc/meshtasticd/available.d/
+  cp /etc/meshtasticd/available.d/lora-<your-device>.yaml \
+     /etc/meshtasticd/config.d/
+  # 3. Start it:
+  /etc/init.d/meshtasticd enable
+  /etc/init.d/meshtasticd start
+  logread -f | grep meshtasticd   # watch it come up
+  ```
+
+  **Heads-up on the upstream libyaml-cpp bug.** OpenWrt 25.12's
+  packaged `libyaml-cpp0.8` apk (downloads.openwrt.org) is broken:
+  the package's Install spec copies the SONAME symlink without the
+  real `.so.0.8.0` payload, producing an 804-byte apk that's just
+  the symlink. Result: `meshtasticd` and anything else linking
+  yaml-cpp segfaults at load with "library not found" / symbol
+  relocation errors. This fork ships a local override at
+  `package/libs/libyaml-cpp/Makefile` that fixes the Install glob
+  AND adds `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` for CMake 4.x
+  compatibility — the resulting r4 apk is ~96 KB and contains the
+  full library. Remove the override once openwrt-25.12's packages
+  feed carries an equivalent fix.
 - `v4l2rtspserver` + `kmod-video-uvc` + `v4l-utils` — plug a UVC USB
   webcam into the router and the mesh wizard's "USB camera → RTSP
   stream" section (or the dedicated **Network → Camera** page) turns
