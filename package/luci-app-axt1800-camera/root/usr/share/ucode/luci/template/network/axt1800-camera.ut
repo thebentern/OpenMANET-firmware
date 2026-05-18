@@ -166,7 +166,8 @@ include('header');
 			<div class="cam-empty">
 				{{ _('No /dev/video* devices found. Plug in a UVC USB webcam and reload this page. If the camera is plugged in but doesn\'t appear, SSH in and run `v4l2-ctl --list-devices` and `dmesg | tail` to see whether the kernel registered it.') }}
 			</div>
-		{% else: %}
+		{% endif %}
+		{% if (length(cameras) > 0): %}
 			<table class="table cbi-section-table" style="width:100%;">
 				<thead>
 					<tr>
@@ -208,7 +209,8 @@ include('header');
 						<select class="cbi-input-select" id="cbi-device" name="device">
 						{% if (length(cameras) == 0): %}
 							<option value="{{ cur_device }}" selected>{{ cur_device }} ({{ _('not currently plugged in') }})</option>
-						{% else: %}
+						{% endif %}
+						{% if (length(cameras) > 0): %}
 							{% for (c in cameras): %}
 								<option value="{{ c.device }}"{{ c.device == cur_device ? ' selected' : '' }}>{{ c.device }} — {{ c.name }}</option>
 							{% endfor %}
