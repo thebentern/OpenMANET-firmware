@@ -1,0 +1,39 @@
+#!/bin/sh
+#
+# /etc/uci-defaults/98-axt1800-camera-port
+#
+# v4l2rtspserver upstream ships /etc/config/v4l2rtspserver with
+# port='554' (the IANA RTSP port). We override that to '8554' on this
+# image for two reasons:
+#
+#   1. Port 554 < 1024 needs CAP_NET_BIND_SERVICE; v4l2rtspserver
+#      under procd doesn't grant that, so binding 554 silently fails
+#      and the operator just sees "connection refused" without any
+#      hint why.
+#   2. 8554 is the de-facto convention for RTSP-over-unprivileged-port
+#      (GStreamer's test server, MediaMTX, most embedded RTSP daemons)
+#      and the Camera page's QR code points to it.
+#
+# We ONLY rewrite when the value is unset or still at the stock 554 —
+# if the operator has already picked something else (via the Camera
+# page or raw uci), we leave it alone.
+
+CUR="$(uci -q get v4l2rtspserver.core.port)"
+
+case "$CUR" in
+	""|554)
+		# Section might not exist yet if v4l2rtspserver's own postinst
+		# hasn't run; create it idempotently before setting the option.
+		if ! uci -q get v4l2rtspserver.core >/dev/null; then
+			uci set v4l2rtspserver.core='v4l2rtspserver'
+		fi
+		uci set v4l2rtspserver.core.port='8554'
+		uci commit v4l2rtspserver
+		# Bounce the daemon so the new port takes effect immediately,
+		# but only if it's already running and the init script exists.
+		[ -x /etc/init.d/v4l2rtspserver ] && \
+			/etc/init.d/v4l2rtspserver restart >/dev/null 2>&1 || true
+		;;
+esac
+
+exit 0
