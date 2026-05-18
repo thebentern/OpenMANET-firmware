@@ -176,6 +176,24 @@ include('header');
 		</div>
 	</fieldset>
 
+	{% if (length(cameras) > 0): %}
+	<fieldset class="cbi-section">
+		<legend>{{ _('Live preview') }}</legend>
+		<div class="cbi-section-descr">
+			{{ _('640×480 MJPG snapshot polled every ~1.5 s. Only available while "Stream enabled" below is OFF — the v4l2rtspserver daemon and the preview can\'t share the device. Use this to confirm framing and exposure before turning the stream on.') }}
+		</div>
+		<div class="cbi-section-node">
+			<div id="cam-preview-frame" style="text-align:center;padding:10px;background:#1a1a1a;border-radius:6px;min-height:240px;display:flex;align-items:center;justify-content:center;">
+				<img id="cam-preview-img" alt=""
+					style="max-width:100%;height:auto;max-height:480px;display:none;border-radius:4px;">
+				<div id="cam-preview-msg" style="color:#bbb;font-style:italic;padding:30px 10px;">
+					{{ _('Loading preview…') }}
+				</div>
+			</div>
+		</div>
+	</fieldset>
+	{% endif %}
+
 	<form method="POST" action="">
 		<fieldset class="cbi-section">
 			<legend>{{ _('Stream profile') }}</legend>
@@ -361,6 +379,62 @@ include('header');
 				setTimeout(function() { copyBtn.innerText = 'Copy URL'; }, 2500);
 			}
 		});
+	}
+
+	// --- Live preview polling --------------------------------------------
+	// Poll /cgi-bin/axt1800-camera-snapshot every ~1.5 s, swap the
+	// resulting JPEG into the <img>. If the CGI returns non-200 (most
+	// often 503 because v4l2rtspserver has the device), show a hint
+	// asking the operator to disable streaming.
+	var previewImg = document.getElementById('cam-preview-img');
+	var previewMsg = document.getElementById('cam-preview-msg');
+	if (previewImg && previewMsg) {
+		var devSelect    = document.querySelector('select[name="device"]');
+		var enabledInput = document.querySelector('input[name="enabled"]');
+		var inFlight     = false;
+
+		function selectedDev() {
+			return (devSelect && devSelect.value) ? devSelect.value : '/dev/video0';
+		}
+
+		function showImg(src) {
+			previewImg.src = src;
+			previewImg.style.display = '';
+			previewMsg.style.display = 'none';
+		}
+		function showMsg(text) {
+			previewImg.style.display = 'none';
+			previewMsg.style.display = '';
+			previewMsg.textContent = text;
+		}
+
+		function poll() {
+			if (document.hidden) return;
+			if (inFlight) return;
+			// If the operator has toggled "Stream enabled" in the form (not
+			// saved yet), skip — the preview can't compete with the daemon.
+			if (enabledInput && enabledInput.checked) {
+				showMsg('Preview disabled while "Stream enabled" is checked. ' +
+				        'Uncheck it (and Save) to preview, or open the RTSP URL above.');
+				return;
+			}
+			inFlight = true;
+			var url = '/cgi-bin/axt1800-camera-snapshot?dev=' +
+			          encodeURIComponent(selectedDev()) + '&t=' + Date.now();
+			var probe = new Image();
+			probe.onload  = function() { showImg(probe.src); inFlight = false; };
+			probe.onerror = function() {
+				showMsg('Preview unavailable. Camera may be in use by another ' +
+				        'process, or unplugged. Reload after fixing.');
+				inFlight = false;
+			};
+			probe.src = url;
+		}
+
+		poll();
+		setInterval(poll, 1500);
+		if (devSelect)    devSelect.addEventListener('change', poll);
+		if (enabledInput) enabledInput.addEventListener('change', poll);
 	}
 })();
 </script>

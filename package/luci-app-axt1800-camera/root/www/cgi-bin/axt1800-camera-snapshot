@@ -1,0 +1,70 @@
+#!/bin/sh
+#
+# /www/cgi-bin/axt1800-camera-snapshot
+#
+# Returns a single MJPG snapshot from a UVC camera as image/jpeg.
+# Polled by the Mesh → Camera LuCI page for live preview.
+#
+# Query string:
+#   dev=/dev/videoN   (whitelist-validated; default /dev/video0)
+#
+# Exits 0 in all cases; the HTTP status is conveyed via the Status header.
+#   200  successful JPEG
+#   400  bad dev parameter
+#   404  device node doesn't exist
+#   503  device busy (typically v4l2rtspserver has it open) — frontend
+#        shows "preview disabled while streaming" when it sees this.
+#   502  capture returned an empty file (unexpected, no-camera edge case)
+#
+# Frame size is fixed at 640×480: small enough to keep poll overhead low,
+# big enough that the operator can confirm framing and exposure. The
+# RTSP stream's resolution is independent.
+
+# Parse the dev= query param (URL-decode the slash) and whitelist it
+# tightly. Anything outside the /dev/videoN pattern is rejected so this
+# CGI can never be tricked into opening an arbitrary path even if
+# uhttpd passes us a malicious query string.
+DEV=$(echo "${QUERY_STRING:-}" | tr '&' '\n' | sed -n 's/^dev=//p' | head -1)
+DEV=$(echo "$DEV" | sed 's/%2F/\//g; s/%2f/\//g')
+
+case "$DEV" in
+	/dev/video[0-9]|/dev/video[0-9][0-9])
+		;;
+	"")
+		DEV="/dev/video0"
+		;;
+	*)
+		printf 'Status: 400 Bad Request\r\nContent-Type: text/plain\r\n\r\nbad dev parameter\n'
+		exit 0
+		;;
+esac
+
+if [ ! -e "$DEV" ]; then
+	printf 'Status: 404 Not Found\r\nContent-Type: text/plain\r\n\r\nno such video device\n'
+	exit 0
+fi
+
+TMP="/tmp/cam-snapshot.$$.jpg"
+trap 'rm -f "$TMP"' EXIT
+
+# UVC cameras emit JFIF-compatible JPEG frames in MJPG mode, so the file
+# v4l2-ctl writes here is something the browser can <img src> directly —
+# no transcode pipeline needed.
+if ! v4l2-ctl --device="$DEV" \
+		--set-fmt-video=width=640,height=480,pixelformat=MJPG \
+		--stream-mmap=1 --stream-count=1 --stream-to="$TMP" \
+		>/dev/null 2>&1; then
+	# Most likely cause: another process (v4l2rtspserver) has the device
+	# open. Returning 503 lets the page distinguish "preview is not
+	# available right now" from real errors.
+	printf 'Status: 503 Service Unavailable\r\nCache-Control: no-store\r\nContent-Type: text/plain\r\n\r\ndevice busy\n'
+	exit 0
+fi
+
+if [ ! -s "$TMP" ]; then
+	printf 'Status: 502 Bad Gateway\r\nContent-Type: text/plain\r\n\r\nempty capture\n'
+	exit 0
+fi
+
+printf 'Status: 200 OK\r\nCache-Control: no-store\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n' "$(wc -c < "$TMP")"
+cat "$TMP"

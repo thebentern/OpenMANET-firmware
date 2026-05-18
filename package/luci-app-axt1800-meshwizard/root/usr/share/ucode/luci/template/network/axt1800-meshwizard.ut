@@ -46,8 +46,10 @@ const CHANNELS_2G = ['1','6','11'];
 const HTMODES_5G = ['HE20','HE40','HE80','HE160'];
 const HTMODES_2G = ['HE20','HE40'];
 
-const CAM_RESOLUTIONS = ['640x480','1280x720','1920x1080'];
-const CAM_FPS = ['10','15','24','30'];
+// USB camera → RTSP is configured on the dedicated Mesh → Camera page
+// (luci-app-axt1800-camera). It used to live here too, but that was
+// duplicate UI on the same UCI section. The wizard now stays focused on
+// mesh fabric (radios, batman-adv, alfred) only.
 
 // --- Handle POST submission ---
 let posted = http.getenv('REQUEST_METHOD') == 'POST';
@@ -65,13 +67,6 @@ if (posted) {
 	let htmode_2g      = http.formvalue('htmode_2g')      || 'HE20';
 	let bridge_mesh    = http.formvalue('bridge_mesh')    == '1';
 	let is_gateway     = http.formvalue('is_gateway')     == '1';
-	let cam_enable     = http.formvalue('cam_enable')     == '1';
-	let cam_device     = http.formvalue('cam_device')     || '/dev/video0';
-	let cam_path       = http.formvalue('cam_path')       || 'cam';
-	let cam_resolution = http.formvalue('cam_resolution') || '1280x720';
-	let cam_fps        = http.formvalue('cam_fps')        || '15';
-	let cam_username   = http.formvalue('cam_username')   || '';
-	let cam_password   = http.formvalue('cam_password')   || '';
 
 	if (!radio_5g) {
 		msg = 'No 5 GHz wifi-device found in /etc/config/wireless — cannot configure mesh.';
@@ -255,46 +250,15 @@ if (posted) {
 			uci.commit('alfred');
 		}
 
-		// --- USB camera → RTSP stream (optional) -----------------------
-		// v4l2rtspserver reads from a /dev/video* node and serves an
-		// RTSP stream. The package's init/UCI config has a single named
-		// section 'core'. We write it here so the wizard's Save button
-		// covers the whole stack — mesh + alfred + (optionally) camera.
-		//
-		// Port 8554 instead of the default 554 so we don't need a
-		// privileged socket (procd's user might not have CAP_NET_BIND).
-		if (uci.get('v4l2rtspserver', 'core') !== null || cam_enable) {
-			if (!uci.get('v4l2rtspserver', 'core'))
-				uci.set('v4l2rtspserver', 'core', 'v4l2rtspserver');
-			uci.set('v4l2rtspserver', 'core', 'enabled',    cam_enable ? '1' : '0');
-			uci.set('v4l2rtspserver', 'core', 'device',     cam_device);
-			uci.set('v4l2rtspserver', 'core', 'port',       '8554');
-			uci.set('v4l2rtspserver', 'core', 'resolution', cam_resolution);
-			uci.set('v4l2rtspserver', 'core', 'fps',        cam_fps);
-			uci.set('v4l2rtspserver', 'core', 'path',       cam_path);
-			uci.set('v4l2rtspserver', 'core', 'format',     'h264');
-			if (length(cam_username) > 0 && length(cam_password) > 0) {
-				uci.set('v4l2rtspserver', 'core', 'username', cam_username);
-				uci.set('v4l2rtspserver', 'core', 'password', cam_password);
-			} else {
-				uci.delete('v4l2rtspserver', 'core', 'username');
-				uci.delete('v4l2rtspserver', 'core', 'password');
-			}
-			uci.commit('v4l2rtspserver');
-		}
-
 		uci.commit('wireless');
 		uci.commit('network');
 
 		// Reload everything non-blocking so the HTTP response goes out
 		// first. wifi reload picks up wireless.mesh0, network reload
-		// picks up bat0/mesh, alfred restart picks up the new -i bat0,
-		// v4l2rtspserver restart picks up the new camera config (only
-		// fires if the init script is present, so safe pre-install).
-		// The [ -x ] guards make this safe even when those packages
-		// aren't installed.
-		popen('(sleep 1 && /etc/init.d/network reload && wifi reload && [ -x /etc/init.d/alfred ] && /etc/init.d/alfred restart ; [ -x /etc/init.d/v4l2rtspserver ] && /etc/init.d/v4l2rtspserver restart) &', 'r');
-		msg = 'Saved. Wireless, batman-adv, alfred, and camera reloading…';
+		// picks up bat0/mesh, alfred restart picks up the new -i bat0.
+		// The [ -x ] guard makes this safe even when alfred isn't installed.
+		popen('(sleep 1 && /etc/init.d/network reload && wifi reload && [ -x /etc/init.d/alfred ] && /etc/init.d/alfred restart) &', 'r');
+		msg = 'Saved. Wireless, batman-adv, and alfred reloading…';
 	}
 }
 
@@ -329,15 +293,6 @@ const cur_bridge_mesh = _cur_bridge_mesh;
 // Gateway = dnsmasq on lan is NOT ignored. Default truthy so a fresh
 // node defaults to "I'm the gateway" if the operator first enables bridging.
 const cur_is_gateway  = uci.get('dhcp', 'lan', 'ignore') != '1';
-
-// USB camera RTSP state (read from v4l2rtspserver package's UCI config)
-const cur_cam_enable     = uci.get('v4l2rtspserver', 'core', 'enabled') == '1';
-const cur_cam_device     = uci.get('v4l2rtspserver', 'core', 'device')     || '/dev/video0';
-const cur_cam_path       = uci.get('v4l2rtspserver', 'core', 'path')       || 'cam';
-const cur_cam_resolution = uci.get('v4l2rtspserver', 'core', 'resolution') || '1280x720';
-const cur_cam_fps        = uci.get('v4l2rtspserver', 'core', 'fps')        || '15';
-const cur_cam_username   = uci.get('v4l2rtspserver', 'core', 'username')   || '';
-const cur_cam_password   = uci.get('v4l2rtspserver', 'core', 'password')   || '';
 
 include('header');
 %}
@@ -494,79 +449,6 @@ include('header');
 					<div class="cbi-value-field">
 						<input class="cbi-input-text" id="cbi-bat-netmask" type="text" name="bat_netmask" value="{{ cur_bat_netmask }}" placeholder="255.255.0.0">
 						<div class="cbi-value-description">{{ _('Defaults to /16 (255.255.0.0) so up to ~65k mesh nodes fit.') }}</div>
-					</div>
-				</div>
-
-			</div>
-		</fieldset>
-
-		<fieldset class="cbi-section">
-			<legend>{{ _('USB camera → RTSP stream (optional)') }}</legend>
-			<div class="cbi-section-descr">
-				{{ _('Plug a UVC USB webcam into the router\'s USB port and this section turns it into a live RTSP stream that any peer on the mesh can pull. Stream URL ends up at rtsp://&lt;this-node-ip&gt;:8554/&lt;path&gt;. For richer setup (auto-detection, QR code, etc.), use Mesh → Camera. Test with VLC: Media → Open Network Stream → paste the URL.') }}
-			</div>
-			<div class="cbi-section-node">
-
-				<div class="cbi-value">
-					<label class="cbi-value-title" for="cbi-cam-enable">{{ _('Enable camera streaming') }}</label>
-					<div class="cbi-value-field">
-						<input class="cbi-input-checkbox" id="cbi-cam-enable" type="checkbox" name="cam_enable" value="1"{{ cur_cam_enable ? ' checked' : '' }}>
-						<div class="cbi-value-description">{{ _('Off by default. Daemon (v4l2rtspserver) idles when unchecked, doesn\'t open any sockets.') }}</div>
-					</div>
-				</div>
-
-				<div class="cbi-value">
-					<label class="cbi-value-title" for="cbi-cam-device">{{ _('Video device') }}</label>
-					<div class="cbi-value-field">
-						<input class="cbi-input-text" id="cbi-cam-device" type="text" name="cam_device" value="{{ cur_cam_device }}" placeholder="/dev/video0">
-						<div class="cbi-value-description">{{ _('Defaults to /dev/video0 (the first UVC camera). Run `v4l2-ctl --list-devices` over SSH if you have multiple cameras and need to pick one.') }}</div>
-					</div>
-				</div>
-
-				<div class="cbi-value">
-					<label class="cbi-value-title" for="cbi-cam-path">{{ _('Stream path') }}</label>
-					<div class="cbi-value-field">
-						<input class="cbi-input-text" id="cbi-cam-path" type="text" name="cam_path" value="{{ cur_cam_path }}" placeholder="cam">
-						<div class="cbi-value-description">{{ _('Appended after the host:port. With path "cam" the stream URL is rtsp://192.168.1.1:8554/cam.') }}</div>
-					</div>
-				</div>
-
-				<div class="cbi-value">
-					<label class="cbi-value-title" for="cbi-cam-resolution">{{ _('Resolution') }}</label>
-					<div class="cbi-value-field">
-						<select class="cbi-input-select" id="cbi-cam-resolution" name="cam_resolution">
-						{% for (r in CAM_RESOLUTIONS): %}
-							<option value="{{ r }}"{{ r == cur_cam_resolution ? ' selected' : '' }}>{{ r }}</option>
-						{% endfor %}
-						</select>
-						<div class="cbi-value-description">{{ _('1280x720 is a good default — sharp enough to read text, low enough bitrate (~1-2 Mbps) to flow over a mesh link without dominating the radio.') }}</div>
-					</div>
-				</div>
-
-				<div class="cbi-value">
-					<label class="cbi-value-title" for="cbi-cam-fps">{{ _('Framerate') }}</label>
-					<div class="cbi-value-field">
-						<select class="cbi-input-select" id="cbi-cam-fps" name="cam_fps">
-						{% for (f in CAM_FPS): %}
-							<option value="{{ f }}"{{ f == cur_cam_fps ? ' selected' : '' }}>{{ f }} fps</option>
-						{% endfor %}
-						</select>
-						<div class="cbi-value-description">{{ _('15 fps is plenty for situational awareness, halves the bandwidth vs 30 fps. Drop to 10 fps to stretch the mesh further.') }}</div>
-					</div>
-				</div>
-
-				<div class="cbi-value">
-					<label class="cbi-value-title" for="cbi-cam-username">{{ _('Username (optional)') }}</label>
-					<div class="cbi-value-field">
-						<input class="cbi-input-text" id="cbi-cam-username" type="text" name="cam_username" value="{{ cur_cam_username }}">
-						<div class="cbi-value-description">{{ _('Leave blank for an open stream (any peer on the mesh can pull). Fill in to require basic-auth on the RTSP URL: rtsp://user:pass@host:8554/path.') }}</div>
-					</div>
-				</div>
-
-				<div class="cbi-value">
-					<label class="cbi-value-title" for="cbi-cam-password">{{ _('Password (optional)') }}</label>
-					<div class="cbi-value-field">
-						<input class="cbi-input-password" id="cbi-cam-password" type="password" name="cam_password" value="{{ cur_cam_password }}">
 					</div>
 				</div>
 
