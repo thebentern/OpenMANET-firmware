@@ -194,3 +194,16 @@ CONFIG_PACKAGE_avahi-daemon=y
 # box for SSH-based admin and scripting.
 CONFIG_PACKAGE_python-meshtastic=y
 CONFIG_PACKAGE_python3=y
+
+# --- USB camera → RTSP streaming -------------------------------------------
+# Plug a UVC-class USB webcam into the AXT-1800's USB-A port and the mesh
+# wizard's "Camera streaming" section flips the daemon on. v4l2rtspserver
+# reads /dev/video0 and serves rtsp://<router-ip>:8554/<path>. Tiny package
+# (~150 KB binary, uses live555 for the RTSP protocol side).
+#
+# UVC is the standard USB Video Class — almost every USB webcam since ~2006
+# is UVC-compliant. No vendor-specific driver chasing.
+CONFIG_PACKAGE_v4l2rtspserver=y
+CONFIG_PACKAGE_kmod-video-core=y
+CONFIG_PACKAGE_kmod-video-uvc=y
+CONFIG_PACKAGE_kmod-video-videobuf2=y

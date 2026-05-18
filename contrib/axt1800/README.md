@@ -22,6 +22,11 @@ A configured AXT-1800 ends up with:
   announced via mDNS through `avahi-daemon`.
 - `python-meshtastic` CLI on the device (`meshtastic --info`,
   `meshtastic --set …`) for SSH-based admin + scripting. Pulls Python 3.
+- `v4l2rtspserver` + `kmod-video-uvc` — plug a UVC USB webcam into the
+  router and the mesh wizard's "USB camera → RTSP stream" section
+  turns it into `rtsp://<router-ip>:8554/<path>` for VLC / ATAK / any
+  RTSP-capable peer on the mesh. Off by default until enabled in the
+  wizard.
 - 2.4 GHz management AP `openmanet-mgmt` on radio1 (WPA3-SAE)
 - LAN at 192.168.1.1/24 — preserved across saves (openmanetd's
   address-reservation worker is pinned off via UCI)
