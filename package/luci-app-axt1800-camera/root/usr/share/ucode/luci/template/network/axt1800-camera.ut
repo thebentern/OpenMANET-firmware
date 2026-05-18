@@ -87,8 +87,15 @@ const cur_password   = uci.get('v4l2rtspserver', 'core', 'password')   || '';
 // Build the RTSP URL. Strip CIDR from the LAN IP. Embed auth if both fields
 // are set. Best-effort — operators using special chars in passwords need
 // to URL-encode themselves; not worth pulling in a URL-encoder for MVP.
-const lan_ip_raw = uci.get('network', 'lan', 'ipaddr') || '192.168.1.1';
-const lan_ip = split(lan_ip_raw, '/')[0];
+//
+// OpenWrt 25.12 sometimes returns network.<iface>.ipaddr as an array (the
+// uci-list datatype, even when only one address is configured) — unwrap
+// before split()ing or we get split(array, …) → null → null[0] → boom.
+let _lan_ip = uci.get('network', 'lan', 'ipaddr');
+if (type(_lan_ip) == 'array')
+	_lan_ip = _lan_ip[0];
+_lan_ip = _lan_ip || '192.168.1.1';
+const lan_ip = split(_lan_ip, '/')[0];
 const auth_prefix = (length(cur_username) > 0 && length(cur_password) > 0)
 	? sprintf('%s:%s@', cur_username, cur_password)
 	: '';
