@@ -64,7 +64,12 @@ define Package/libyaml-cpp/description
   yaml-cpp is a YAML parser and emitter in C++ matching the YAML 1.2 spec.
 endef
 
+# yaml-cpp 0.8.0's CMakeLists.txt has cmake_minimum_required(VERSION X.Y)
+# with X.Y < 3.5, which CMake 4.x has removed support for. The error
+# message itself suggests the workaround. Once yaml-cpp upstream bumps
+# the floor (or openwrt ships a newer point release) this can drop.
 CMAKE_OPTIONS += \
+	-DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
 	-DYAML_BUILD_SHARED_LIBS=ON \
 	-DYAML_CPP_BUILD_TESTS=OFF \
 	-DYAML_CPP_BUILD_TOOLS=OFF
