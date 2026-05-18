@@ -172,3 +172,25 @@ CONFIG_PACKAGE_luci-app-axt1800-meshwizard=m
 #   CONFIG_PACKAGE_relayd=y
 #   CONFIG_PACKAGE_luci-app-ekhwizards=y
 #   CONFIG_PACKAGE_luci-theme-openmanetargon=y
+
+# --- meshtasticd: LoRa-Meshtastic daemon ------------------------------------
+# Comes from feeds/meshtastic (github.com/meshtastic/openwrt, branch
+# openwrt-25.12). Plug a USB LoRa stick (Heltec / RAK / etc.) into the
+# AXT-1800's USB-A port and the daemon is ready. With no radio attached, it
+# idles cleanly — start_service runs and the process loops waiting for
+# hardware. Web UI auto-enabled (served from /usr/share/meshtasticd/web by
+# meshtasticd's own embedded HTTP server, port set in /etc/meshtasticd/
+# config.yaml). mDNS announce via avahi-daemon.
+CONFIG_PACKAGE_meshtasticd=y
+CONFIG_MESHTASTICD_ENABLE_SPI=y
+CONFIG_MESHTASTICD_ENABLE_USB=y
+CONFIG_MESHTASTICD_ENABLE_WEB=y
+CONFIG_PACKAGE_meshtasticd-web=y
+CONFIG_PACKAGE_meshtasticd-avahi-service=y
+CONFIG_PACKAGE_avahi-daemon=y
+# python-meshtastic: the upstream CLI tool (entry point `meshtastic`). Pulls
+# in Python 3 + python-ajsonrpc + python-protobuf, ~25–30 MB. Gives the
+# operator `meshtastic --info`, `meshtastic --set ...`, etc. directly on the
+# box for SSH-based admin and scripting.
+CONFIG_PACKAGE_python-meshtastic=y
+CONFIG_PACKAGE_python3=y
