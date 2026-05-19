@@ -1,0 +1,184 @@
+# OpenMANET board config for GL.iNet GL-MT3000 (Beryl AX)
+# SoC: MediaTek MT7981B (filogic 820), aarch64_cortex-a53
+# RAM: 512 MB DDR4   |   Flash: 256 MB NAND (roomier than AXT-1800's 128 MB)
+# Onboard WiFi: MT7976 dual-band 2.4G/5G via mt76 + mt7981-firmware.
+#
+# Same architecture (aarch64_cortex-a53) as the AXT-1800, so every apk we
+# build is binary-compatible across both boards — meshtastic-repo's prebuilt
+# apks, our luci-app-openmanet-* packages, tailscale, etc. all just work.
+# What differs here is purely the kernel/firmware side of the image.
+#
+# Drop this file at:  boards/glinet-mt3000/target_diffconfig  and run the
+# project setup script with -b glinet-mt3000.
+
+# --- Target / device ---------------------------------------------------------
+CONFIG_TARGET_MULTI_PROFILE=y
+CONFIG_TARGET_mediatek=y
+CONFIG_TARGET_mediatek_filogic=y
+CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_glinet_gl-mt3000=y
+
+CONFIG_VERSION_MANUFACTURER="GL.iNet"
+CONFIG_VERSION_PRODUCT="GL-MT3000"
+
+# --- Onboard mt76 WiFi (MT7981B family) -------------------------------------
+# common/openmanet_diffconfig disables mt76 (because AXT-1800 doesn't need
+# it). We turn it back on here. mt7981-firmware provides the BDF/calibration
+# directly — no per-device blob package like AXT-1800's ipq-wifi-glinet-...
+CONFIG_PACKAGE_kmod-mt76=y
+CONFIG_PACKAGE_kmod-mt76-connac=y
+CONFIG_PACKAGE_kmod-mt7915e=y
+CONFIG_PACKAGE_kmod-mt7981-firmware=y
+CONFIG_PACKAGE_kmod-mt7915-firmware=y
+
+# --- Disable ALL Morse Micro / HaLow packages -------------------------------
+# Identical posture to AXT-1800 (no Morse hardware on MT3000 either).
+CONFIG_PACKAGE_kmod-morse=n
+CONFIG_PACKAGE_morsectrl=n
+CONFIG_PACKAGE_morse-bundle=n
+CONFIG_PACKAGE_morse-copy-coredump=n
+CONFIG_PACKAGE_smart_manager=n
+CONFIG_PACKAGE_morse_mesh11sd=n
+CONFIG_PACKAGE_morse-button=n
+CONFIG_PACKAGE_morse-leds=n
+CONFIG_PACKAGE_morse-bcf-info=n
+CONFIG_PACKAGE_morse-fw=n
+CONFIG_PACKAGE_morse-fw-6108=n
+CONFIG_PACKAGE_morse-fw-6108-tlm=n
+CONFIG_PACKAGE_morse-fw-8108=n
+CONFIG_PACKAGE_morse-fw-8108-tlm=n
+CONFIG_PACKAGE_morse-fw-8108-flm=n
+CONFIG_PACKAGE_netifd-morse=n
+CONFIG_PACKAGE_morse-board-config-hotplug-model=n
+CONFIG_PACKAGE_morse-mode=n
+CONFIG_PACKAGE_morse-boot-prints=n
+CONFIG_PACKAGE_morseguide=n
+CONFIG_PACKAGE_virtual-wire=n
+CONFIG_PACKAGE_kmod-trelay=n
+CONFIG_PACKAGE_luci-app-morseconfig=n
+CONFIG_PACKAGE_luci-theme-morseargon=n
+
+# Morse-specific hostapd/wpa_supplicant S1G build flags
+# CONFIG_MORSE_HOSTAPD_S1G_EAP is not set
+# CONFIG_MORSE_HOSTAPD_S1G_ACS is not set
+# CONFIG_MORSE_WPA_SUPPLICANT_S1G_MESH_NETWORKING is not set
+# CONFIG_MORSE_WPA_SUPPLICANT_S1G_EAP is not set
+
+# Other Morse-adjacent BSPs
+CONFIG_PACKAGE_bsp-halowlink2=n
+CONFIG_PACKAGE_bsp-ht-hd01-v2=n
+CONFIG_PACKAGE_ht-service=n
+CONFIG_PACKAGE_ftdi-usb-spi=n
+CONFIG_PACKAGE_kmod-ftdi-usb-spi=n
+
+# --- Drop WiFi firmware/drivers that don't apply to this hardware -----------
+# Disable ath11k (Qualcomm) and the other non-MediaTek WiFi stacks.
+CONFIG_PACKAGE_kmod-iwlwifi=n
+CONFIG_PACKAGE_iwlwifi-firmware-ax200=n
+CONFIG_PACKAGE_iwlwifi-firmware-ax210=n
+CONFIG_PACKAGE_kmod-owl-loader=n
+CONFIG_PACKAGE_kmod-ath11k=n
+CONFIG_PACKAGE_kmod-ath11k-ahb=n
+CONFIG_PACKAGE_kmod-ath11k-pci=n
+CONFIG_PACKAGE_ath11k-firmware-ipq6018=n
+CONFIG_PACKAGE_ath11k-firmware-wcn6855=n
+CONFIG_PACKAGE_ath10k-firmware-qca6174=n
+CONFIG_PACKAGE_kmod-ath10k=n
+CONFIG_PACKAGE_kmod-ath9k=n
+CONFIG_PACKAGE_kmod-ath9k-htc=n
+CONFIG_PACKAGE_ath9k-htc-firmware=n
+CONFIG_PACKAGE_kmod-rt2800-lib=n
+CONFIG_PACKAGE_kmod-rt2800-usb=n
+CONFIG_PACKAGE_kmod-rt2x00-lib=n
+
+# --- Hardware peripherals not present on MT3000 -----------------------------
+# MT3000 is fanless. The PWM fan kmod that AXT-1800 needs (for its chassis
+# fan controller) has no purpose here.
+CONFIG_PACKAGE_kmod-hwmon-pwmfan=n
+
+# --- Mesh data plane: 802.11s on mt76 ---------------------------------------
+# common/openmanet_diffconfig already sets MAC80211_MESH=y, batman-adv, batctl,
+# wpad-mbedtls, ip-full, ethtool, iw-full. mt76 supports 802.11s out of the
+# box; no driver-side tuning needed.
+
+# --- NAND trimming: less aggressive than AXT-1800 ---------------------------
+# MT3000 has 256 MB NAND vs AXT-1800's 128 MB — same image still has to fit
+# alongside the overlay's runtime growth (apk-installed meshtasticd + its
+# Python 3 deps eat ~30-40 MB), but we have ~120 MB more headroom. Keep the
+# heavyweight extras off anyway to keep build time / churn down.
+CONFIG_PACKAGE_wireshark=n
+CONFIG_PACKAGE_mediamtx=n
+CONFIG_PACKAGE_adsbtocot=n
+CONFIG_PACKAGE_dump1090=n
+CONFIG_PACKAGE_rtl-sdr=n
+
+# USB audio stack — only keep if you have audio plans
+CONFIG_PACKAGE_kmod-usb-audio=n
+CONFIG_PACKAGE_alsa-lib=n
+CONFIG_PACKAGE_alsa-utils=n
+CONFIG_PACKAGE_libopus=n
+CONFIG_PACKAGE_portaudio=n
+CONFIG_PACKAGE_kmod-input-gpio-encoder=n
+
+# GPS — keep off by default; toggle on if you plug a USB GPS in
+# CONFIG_PACKAGE_gpsd=n
+# CONFIG_PACKAGE_gpsd-clients=n
+
+# --- LuCI Lua runtime ------------------------------------------------------
+# Same reason as AXT-1800: luci-mod-admin-full (Lua-based) is pulled in by
+# common/openmanet_diffconfig but the runtime isn't, so admin pages 500
+# with "Unable to load Lua runtime" on first boot. Add explicitly.
+CONFIG_PACKAGE_luci-lua-runtime=y
+CONFIG_PACKAGE_luci-compat=y
+
+# --- LuCI theme ------------------------------------------------------------
+CONFIG_PACKAGE_luci-theme-bootstrap=y
+CONFIG_PACKAGE_luci-theme-openmanetargon=y
+
+# --- Mesh setup wizard + sibling pages -------------------------------------
+# Unlike AXT-1800 (=m due to NAND tightness), MT3000 has the room to auto-
+# install the wizard into the factory image. Operators can boot into the
+# wizard immediately rather than apk-installing post-flash.
+CONFIG_PACKAGE_luci-app-openmanet-meshwizard=y
+
+# --- Keep ATAK / OpenMANET userspace ----------------------------------------
+# Same set as AXT-1800; sourced from common/openmanet_diffconfig.
+#   CONFIG_PACKAGE_openmanetd=y
+#   CONFIG_PACKAGE_alfred=y
+#   CONFIG_PACKAGE_ALFRED_GPSD=y
+#   CONFIG_PACKAGE_ALFRED_BATHOSTS=y
+#   CONFIG_PACKAGE_dpp-handler=y
+#   CONFIG_PACKAGE_vxlan=y
+#   CONFIG_PACKAGE_relayd=y
+
+# --- Meshtastic (via pre-built apk repo) -----------------------------------
+# Same delivery model as AXT-1800: meshtastic-repo configures the apk feed,
+# uci-defaults does best-effort first-boot install. Arch matches (aarch64
+# cortex-a53) so the apks at openwrt.meshtastic.org work as-is.
+CONFIG_PACKAGE_meshtastic-repo=y
+CONFIG_PACKAGE_avahi-daemon=y
+CONFIG_PACKAGE_libgpiod=y
+CONFIG_PACKAGE_libyaml-cpp=y
+CONFIG_PACKAGE_libuv=y
+CONFIG_PACKAGE_libusb-1.0=y
+CONFIG_PACKAGE_bluez-libs=y
+CONFIG_PACKAGE_i2c-tools=y
+CONFIG_PACKAGE_python3=y
+
+# --- USB camera → RTSP streaming -------------------------------------------
+# MT3000 has USB 3.0; UVC webcams work exactly the same.
+CONFIG_PACKAGE_v4l2rtspserver=y
+CONFIG_PACKAGE_kmod-video-core=y
+CONFIG_PACKAGE_kmod-video-uvc=y
+CONFIG_PACKAGE_kmod-video-videobuf2=y
+CONFIG_PACKAGE_v4l-utils=y
+CONFIG_PACKAGE_luci-app-openmanet-camera=y
+
+# --- meshtasticd LuCI page --------------------------------------------------
+CONFIG_PACKAGE_luci-app-openmanet-meshtasticd=y
+
+# --- Mesh status / diagnostic LuCI pages -----------------------------------
+# meshstatus + cot auto-detect the 802.11s interface via `iw dev` so they
+# work on either ath11k (AXT-1800) or mt76 (MT3000) without per-board tuning.
+CONFIG_PACKAGE_luci-app-openmanet-meshstatus=y
+CONFIG_PACKAGE_luci-app-openmanet-tailscale=y
+CONFIG_PACKAGE_luci-app-openmanet-cot=y
