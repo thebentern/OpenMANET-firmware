@@ -3,15 +3,20 @@
 #
 # Two test depths, controlled by --full:
 #
-#   default   (~5 min)  — set up the per-board OpenWrt tree if missing,
-#                          apply the board's diffconfig, `make defconfig`,
-#                          smoke-build one trivial luci-app-openmanet-*
-#                          package. Catches Kconfig typos, missing deps,
-#                          target/subtarget mismatches.
+#   default   (~3-5 min) — set up the per-board OpenWrt tree if missing,
+#                           sync the fork, run feed update + install, apply
+#                           the board's diffconfig, `make defconfig`.
+#                           Verifies target/subtarget resolved, WiFi driver
+#                           selected, all 6 OpenMANET LuCI pages enabled.
+#                           Catches Kconfig typos, target/subtarget
+#                           mismatches, missing feed deps.
 #
 #   --full   (~30-90 min) — also `make download` + `make -j$(nproc)`.
 #                            Produces a real factory image artifact in
-#                            bin/targets/<target>/.
+#                            bin/targets/<target>/. This is also when host
+#                            tools (host-lua etc.) actually get built —
+#                            the quick path deliberately skips compile
+#                            steps so it doesn't trigger that 30-min cost.
 #
 # Usage:
 #   ./openmanet-build-test.sh [board-name] [--full]
@@ -198,26 +203,11 @@ ssh "$VM_HOST" "bash -lc '
 	echo \"  OpenMANET LuCI pages:   \$(grep \"^CONFIG_PACKAGE_luci-app-openmanet\" .config 2>/dev/null | grep -v \"=n\" | wc -l) selected\"
 '"
 
-# --- smoke compile: one cheap LuCI package -------------------------------
-step "Smoke compile: luci-app-openmanet-meshwizard"
-echo "  (no source compile — pure data package — should be < 30 seconds)"
-
-ssh "$VM_HOST" "bash -lc '
-	cd $VM_TREE
-	make package/luci-app-openmanet-meshwizard/{clean,compile} 2>&1 | tail -8
-'" 2>&1 | sed 's/^/  /'
-
-# Check the resulting apk was created
-ARCH=$(ssh "$VM_HOST" "bash -lc 'cd $VM_TREE && grep \"^CONFIG_TARGET_ARCH_PACKAGES=\" .config | cut -d\\\" -f2'")
-APK_PATH="bin/packages/${ARCH}/base/luci-app-openmanet-meshwizard-*.apk"
-HAS_APK=$(ssh "$VM_HOST" "bash -lc 'ls $VM_TREE/${APK_PATH} 2>/dev/null | head -1'")
-if [[ -n "$HAS_APK" ]]; then
-	APK_SIZE=$(ssh "$VM_HOST" "bash -lc 'stat -c%s $HAS_APK 2>/dev/null'")
-	ok "Smoke apk built: $(basename "$HAS_APK") ($APK_SIZE bytes)"
-else
-	fail "Smoke apk NOT produced — check $DEFCONFIG_LOG and the make output above"
-	exit 1
-fi
+# Smoke compile is intentionally NOT in the quick path: on a fresh build
+# tree, the first `make package/X/compile` triggers a chain that includes
+# building host tools (host-lua, etc.) which needs `make download` and
+# ~30 min of toolchain setup. That's the wrong cost-trade for "did my
+# diffconfig parse correctly." Use --full when you actually want artifacts.
 
 # --- optional full build ---------------------------------------------------
 if [[ "$FULL" == "1" ]]; then
@@ -237,7 +227,7 @@ fi
 
 # --- summary ---------------------------------------------------------------
 step "Done"
-ok "Board $BOARD diffconfig is syntactically valid; defconfig resolved; LuCI smoke compile passes."
+ok "Board $BOARD diffconfig is syntactically valid; defconfig resolved cleanly."
 if [[ "$FULL" == "0" ]]; then
 	echo
 	echo "  For a real image build:"
