@@ -1,0 +1,13 @@
+{
+	"admin/mesh/camera": {
+		"title": "Camera",
+		"order": 20,
+		"action": {
+			"type": "template",
+			"path": "network/openmanet-camera"
+		},
+		"depends": {
+			"acl": [ "luci-app-openmanet-camera" ]
+		}
+	}
+}

@@ -1,0 +1,23 @@
+{
+	"admin/mesh": {
+		"title": "Mesh",
+		"order": 25,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-openmanet-meshwizard" ]
+		}
+	},
+	"admin/mesh/wizard": {
+		"title": "Wizard",
+		"order": 10,
+		"action": {
+			"type": "template",
+			"path": "network/openmanet-meshwizard"
+		},
+		"depends": {
+			"acl": [ "luci-app-openmanet-meshwizard" ]
+		}
+	}
+}

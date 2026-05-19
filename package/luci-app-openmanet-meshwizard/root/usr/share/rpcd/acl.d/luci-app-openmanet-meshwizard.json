@@ -1,0 +1,11 @@
+{
+	"luci-app-openmanet-meshwizard": {
+		"description": "Grant access to the AXT-1800 mesh wizard",
+		"read": {
+			"uci": [ "network", "wireless", "system", "dhcp", "alfred", "v4l2rtspserver" ]
+		},
+		"write": {
+			"uci": [ "network", "wireless", "system", "dhcp", "alfred", "v4l2rtspserver" ]
+		}
+	}
+}

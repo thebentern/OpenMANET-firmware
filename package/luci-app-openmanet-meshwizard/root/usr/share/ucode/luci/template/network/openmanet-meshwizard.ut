@@ -1,0 +1,481 @@
+{%
+//
+// AXT-1800 OpenMANET mesh setup wizard, server-side rendered.
+//
+// Pure ucode template, no JS view. The "type": "view" path involves
+// LuCI's client-side runtime calling ui.instantiateView(...) which has
+// somehow tickled a deterministic brick on AXT-1800 + OpenMANET 24.10
+// (6.6 kernel + ipq60xx backported from upstream main). Avoiding that
+// code path entirely by rendering HTML server-side here.
+//
+
+import { cursor } from 'uci';
+import { popen } from 'fs';
+
+const uci = cursor();
+
+// --- Detect the 5 GHz wifi-device dynamically ---
+let radio_5g = null;
+let radio_2g = null;
+uci.foreach('wireless', 'wifi-device', (s) => {
+	if (s.band == '5g') radio_5g ??= s['.name'];
+	if (s.band == '2g') radio_2g ??= s['.name'];
+});
+
+const COUNTRIES = [
+	['00', 'World (default, restricted)'],
+	['US', 'United States'],
+	['CA', 'Canada'],
+	['GB', 'United Kingdom'],
+	['DE', 'Germany'],
+	['FR', 'France'],
+	['NL', 'Netherlands'],
+	['SE', 'Sweden'],
+	['AU', 'Australia'],
+	['NZ', 'New Zealand'],
+	['JP', 'Japan']
+];
+
+const CHANNELS_5G = ['36','40','44','48','149','153','157','161','165'];
+const CHANNELS_2G = ['1','6','11'];
+
+// Channel widths. Default (HE80 on 5 GHz, HE20 on 2.4 GHz) matches what
+// ath11k auto-picks, which is great for throughput but mediocre for
+// MANET range/resilience. Operators who want longer reach typically
+// drop to HE20 or HE40.
+const HTMODES_5G = ['HE20','HE40','HE80','HE160'];
+const HTMODES_2G = ['HE20','HE40'];
+
+// USB camera → RTSP is configured on the dedicated Mesh → Camera page
+// (luci-app-openmanet-camera). It used to live here too, but that was
+// duplicate UI on the same UCI section. The wizard now stays focused on
+// mesh fabric (radios, batman-adv, alfred) only.
+
+// --- Handle POST submission ---
+let posted = http.getenv('REQUEST_METHOD') == 'POST';
+let msg = null;
+
+if (posted) {
+	let mesh_id        = http.formvalue('mesh_id')        || 'openmanet-mesh';
+	let channel        = http.formvalue('channel')        || '36';
+	let encryption     = http.formvalue('encryption')     || 'none';
+	let key            = http.formvalue('key')            || '';
+	let country        = http.formvalue('country')        || '00';
+	let mesh_2g_enable = http.formvalue('mesh_2g_enable') == '1';
+	let channel_2g     = http.formvalue('channel_2g')     || '6';
+	let htmode_5g      = http.formvalue('htmode_5g')      || 'HE80';
+	let htmode_2g      = http.formvalue('htmode_2g')      || 'HE20';
+	let bridge_mesh    = http.formvalue('bridge_mesh')    == '1';
+	let is_gateway     = http.formvalue('is_gateway')     == '1';
+
+	if (!radio_5g) {
+		msg = 'No 5 GHz wifi-device found in /etc/config/wireless — cannot configure mesh.';
+	} else {
+		// --- network.bat0 (batman-adv soft-iface) -----------------------
+		// Pure L2 by default — no IP assignment. User can bridge into LAN
+		// or set a static IP via Network → Interfaces afterward. We avoid
+		// touching network.lan here to eliminate lockout risk.
+		//
+		// Idempotent: create the section type only when missing, but
+		// always overwrite the option values. A previous install can
+		// leave a stub bat0 section with stray fields (kmod-batman-adv's
+		// default state seeds multicast_mode), so guarding all the
+		// options behind `if (!uci.get(...))` would skip the real config.
+		if (!uci.get('network', 'bat0'))
+			uci.set('network', 'bat0', 'interface');
+		uci.set('network', 'bat0', 'proto',           'batadv');
+		uci.set('network', 'bat0', 'routing_algo',    'BATMAN_V');
+		uci.set('network', 'bat0', 'aggregated_ogms', '1');
+		uci.set('network', 'bat0', 'gw_mode',         'off');
+		// Note on multicast_mode: kmod-batman-adv defaults this to '0'
+		// (multicast snooping OFF → batman-adv floods multicast as
+		// broadcast). For ATAK CoT-over-mesh that's actually the safer
+		// choice: every peer receives every position broadcast without
+		// needing well-behaved IGMP/MLD reports from clients. netifd
+		// also re-asserts the '0' default on every `network reload`, so
+		// trying to override here is a losing battle. Left alone
+		// intentionally.
+
+		// --- network.mesh (batman-adv hard-iface; binds wifi to bat0) ---
+		if (!uci.get('network', 'mesh'))
+			uci.set('network', 'mesh', 'interface');
+		uci.set('network', 'mesh', 'proto',  'batadv_hardif');
+		uci.set('network', 'mesh', 'master', 'bat0');
+
+		// --- wireless.mesh0 (the 802.11s wifi-iface on the 5 GHz radio) -
+		if (!uci.get('wireless', 'mesh0')) {
+			uci.set('wireless', 'mesh0', 'wifi-iface');
+		}
+		uci.set('wireless', 'mesh0', 'device',     radio_5g);
+		uci.set('wireless', 'mesh0', 'network',    'mesh');
+		uci.set('wireless', 'mesh0', 'mode',       'mesh');
+		uci.set('wireless', 'mesh0', 'disabled',   '0');
+		uci.set('wireless', 'mesh0', 'mesh_id',    mesh_id);
+		uci.set('wireless', 'mesh0', 'encryption', encryption);
+		if (encryption == 'sae' && length(key) >= 8)
+			uci.set('wireless', 'mesh0', 'key', key);
+		else
+			uci.delete('wireless', 'mesh0', 'key');
+
+		// --- Radio settings — channel, country, and enable the radio ---
+		// Stock OpenWrt ships radios with disabled=1; mesh needs them on.
+		uci.set('wireless', radio_5g, 'disabled', '0');
+		uci.set('wireless', radio_5g, 'channel',  channel);
+		uci.set('wireless', radio_5g, 'country',  country);
+		uci.set('wireless', radio_5g, 'htmode',   htmode_5g);
+		if (radio_2g) {
+			uci.set('wireless', radio_2g, 'country', country);
+			uci.set('wireless', radio_2g, 'htmode',  htmode_2g);
+		}
+
+		// --- Optional: 2.4 GHz mesh on the second radio --------------
+		// Creates a parallel mesh interface (wireless.mesh1) on the
+		// 2.4 GHz radio with the SAME mesh_id + encryption as the 5 GHz
+		// side, but a different channel. Both wifi-ifaces are bound to
+		// bat0 via batadv_hardif, so batman-adv bridges traffic between
+		// bands at L2 — a peer joining on either band sees every other
+		// peer regardless of which band that peer is on.
+		//
+		// Coexists with the 2.4 GHz mgmt AP: ath11k supports AP + mesh
+		// VAPs on the same radio, sharing the channel. Setting
+		// channel_2g here also moves the mgmt AP to that channel
+		// (single radio = single channel constraint).
+		if (radio_2g && mesh_2g_enable) {
+			uci.set('wireless', radio_2g, 'disabled', '0');
+			uci.set('wireless', radio_2g, 'channel',  channel_2g);
+
+			if (!uci.get('wireless', 'mesh1'))
+				uci.set('wireless', 'mesh1', 'wifi-iface');
+			uci.set('wireless', 'mesh1', 'device',     radio_2g);
+			uci.set('wireless', 'mesh1', 'network',    'mesh_2g');
+			uci.set('wireless', 'mesh1', 'mode',       'mesh');
+			uci.set('wireless', 'mesh1', 'disabled',   '0');
+			uci.set('wireless', 'mesh1', 'mesh_id',    mesh_id);
+			uci.set('wireless', 'mesh1', 'encryption', encryption);
+			if (encryption == 'sae' && length(key) >= 8)
+				uci.set('wireless', 'mesh1', 'key', key);
+			else
+				uci.delete('wireless', 'mesh1', 'key');
+
+			if (!uci.get('network', 'mesh_2g'))
+				uci.set('network', 'mesh_2g', 'interface');
+			uci.set('network', 'mesh_2g', 'proto',  'batadv_hardif');
+			uci.set('network', 'mesh_2g', 'master', 'bat0');
+		} else if (radio_2g) {
+			// 2.4 GHz mesh opt-out: tear down mesh1 cleanly. mgmt AP on
+			// radio_2g (wireless.mgmt_ap, laid down by uci-defaults)
+			// stays untouched.
+			if (uci.get('wireless', 'mesh1'))
+				uci.set('wireless', 'mesh1', 'disabled', '1');
+			if (uci.get('network', 'mesh_2g'))
+				uci.delete('network', 'mesh_2g');
+		}
+
+		// --- bat0 L3 (optional) — assign a static IP to the mesh ------
+		// network.bat0 owns proto=batadv (creates the bat0 netdev). To put
+		// L3 on top, we use a SECOND interface section that targets bat0
+		// as its device. Keeps the proto=batadv config clean and avoids
+		// netifd confusion.
+		let bat_ip      = http.formvalue('bat_ip')      || '';
+		let bat_netmask = http.formvalue('bat_netmask') || '255.255.0.0';
+
+		if (length(bat_ip) >= 7) {
+			if (!uci.get('network', 'bat0_ip'))
+				uci.set('network', 'bat0_ip', 'interface');
+			uci.set('network', 'bat0_ip', 'device',  'bat0');
+			uci.set('network', 'bat0_ip', 'proto',   'static');
+			uci.set('network', 'bat0_ip', 'ipaddr',  bat_ip);
+			uci.set('network', 'bat0_ip', 'netmask', bat_netmask);
+		} else if (uci.get('network', 'bat0_ip')) {
+			// Operator cleared the field — opt out of L3 entirely.
+			uci.delete('network', 'bat0_ip');
+		}
+
+		// --- Bridge bat0 into br-lan (optional) ------------------------
+		// When enabled, every node's br-lan (wired ports + mgmt-AP) joins
+		// the mesh as one big L2 broadcast domain via batman-adv. A
+		// client on this router's mgmt-AP can ARP/talk directly to a
+		// printer or laptop on a peer node's lan1.
+		//
+		// Bridge Loop Avoidance (BLA) in batman-adv is on by default,
+		// so a stray wired link between two nodes won't form a loop
+		// with the wireless mesh.
+		//
+		// Find the br-lan device section by its `name` option (OpenWrt
+		// 25.12 uses an anonymous `config device` with `option name
+		// 'br-lan'` plus `list ports 'lan1' 'lan2'`).
+		let br_section = null;
+		uci.foreach('network', 'device', (s) => {
+			if (s.name == 'br-lan') br_section = s['.name'];
+		});
+
+		if (br_section) {
+			let ports = uci.get('network', br_section, 'ports');
+			if (type(ports) == 'string') ports = [ ports ];
+			if (type(ports) != 'array')  ports = [ ];
+
+			if (bridge_mesh) {
+				let has = false;
+				for (let p in ports) if (p == 'bat0') has = true;
+				if (!has) push(ports, 'bat0');
+			} else {
+				let kept = [ ];
+				for (let p in ports) if (p != 'bat0') push(kept, p);
+				ports = kept;
+			}
+			uci.set('network', br_section, 'ports', ports);
+		}
+
+		// Gateway / non-gateway DHCP role. Only the gateway node should
+		// run dnsmasq on the (now-bridged) br-lan; other nodes would
+		// fight it with conflicting leases.
+		//
+		// We only flip dhcp.lan.ignore when bridge_mesh is on. When
+		// bridge is off, leave dnsmasq behavior at its default — each
+		// node serves its own un-bridged LAN, no conflict possible.
+		if (bridge_mesh) {
+			uci.set('dhcp', 'lan', 'ignore', is_gateway ? '0' : '1');
+			uci.commit('dhcp');
+		}
+
+		// --- alfred — point its batman gossip side at bat0 -------------
+		// The alfred package ships /etc/config/alfred with `list interface
+		// 'br-ahwlan'` because it's designed for OpenMANET's HaLow boards
+		// (which have a HaLow LAN bridge). On AXT-1800 there is no
+		// br-ahwlan, so alfred spins forever logging "can't get interface".
+		// Overwrite to bat0 here so the wizard fully provisions the stack.
+		if (uci.get('alfred', 'alfred')) {
+			uci.set('alfred', 'alfred', 'interface', ['bat0']);
+			uci.set('alfred', 'alfred', 'batmanif',  'bat0');
+			uci.commit('alfred');
+		}
+
+		uci.commit('wireless');
+		uci.commit('network');
+
+		// Reload everything non-blocking so the HTTP response goes out
+		// first. wifi reload picks up wireless.mesh0, network reload
+		// picks up bat0/mesh, alfred restart picks up the new -i bat0.
+		// The [ -x ] guard makes this safe even when alfred isn't installed.
+		popen('(sleep 1 && /etc/init.d/network reload && wifi reload && [ -x /etc/init.d/alfred ] && /etc/init.d/alfred restart) &', 'r');
+		msg = 'Saved. Wireless, batman-adv, and alfred reloading…';
+	}
+}
+
+// --- Read current values for rendering ---
+const cur_mesh_id     = uci.get('wireless', 'mesh0', 'mesh_id')     || 'openmanet-mesh';
+const cur_encryption  = uci.get('wireless', 'mesh0', 'encryption')  || 'none';
+const cur_key         = uci.get('wireless', 'mesh0', 'key')         || '';
+const cur_channel     = (radio_5g && uci.get('wireless', radio_5g, 'channel')) || '36';
+const cur_country     = (radio_5g && uci.get('wireless', radio_5g, 'country')) || '00';
+const cur_bat_ip      = uci.get('network', 'bat0_ip', 'ipaddr')     || '';
+const cur_bat_netmask = uci.get('network', 'bat0_ip', 'netmask')    || '255.255.0.0';
+// 2.4 GHz mesh state: present + not explicitly disabled
+const cur_mesh_2g_enable =
+	uci.get('wireless', 'mesh1') &&
+	uci.get('wireless', 'mesh1', 'disabled') != '1';
+const cur_channel_2g  = (radio_2g && uci.get('wireless', radio_2g, 'channel')) || '6';
+const cur_htmode_5g   = (radio_5g && uci.get('wireless', radio_5g, 'htmode'))  || 'HE80';
+const cur_htmode_2g   = (radio_2g && uci.get('wireless', radio_2g, 'htmode'))  || 'HE20';
+
+// Bridge state: detect whether bat0 is currently in the br-lan device's
+// ports list. Walk anonymous `config device` sections to find br-lan.
+let _cur_br = null;
+uci.foreach('network', 'device', (s) => {
+	if (s.name == 'br-lan') _cur_br = s['.name'];
+});
+let _cur_ports = _cur_br ? uci.get('network', _cur_br, 'ports') : [];
+if (type(_cur_ports) == 'string') _cur_ports = [ _cur_ports ];
+if (type(_cur_ports) != 'array')  _cur_ports = [ ];
+let _cur_bridge_mesh = false;
+for (let p in _cur_ports) if (p == 'bat0') _cur_bridge_mesh = true;
+const cur_bridge_mesh = _cur_bridge_mesh;
+// Gateway = dnsmasq on lan is NOT ignored. Default truthy so a fresh
+// node defaults to "I'm the gateway" if the operator first enables bridging.
+const cur_is_gateway  = uci.get('dhcp', 'lan', 'ignore') != '1';
+
+include('header');
+%}
+
+<div class="cbi-map">
+	<h2 name="content">{{ _('Mesh Wizard') }}</h2>
+	<div class="cbi-map-descr">
+		{{ _('Configure the 802.11s mesh on the 5 GHz radio. Other nodes joining must use the same Mesh ID, channel, and encryption key.') }}
+	</div>
+
+	{% if (msg): %}
+	<div class="alert-message notice" style="background:#2d6a4f;color:#fff;padding:10px;border-radius:6px;margin:1em 0;">
+		{{ msg }}
+	</div>
+	{% endif %}
+
+	<form method="POST" action="">
+		<fieldset class="cbi-section">
+			<legend>{{ _('Mesh') }}</legend>
+			<div class="cbi-section-node">
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-mesh-id">{{ _('Mesh ID') }}</label>
+					<div class="cbi-value-field">
+						<input class="cbi-input-text" id="cbi-mesh-id" type="text" name="mesh_id" value="{{ cur_mesh_id }}" required>
+						<div class="cbi-value-description">{{ _('Must match on every node. Treated as a network identifier, not a secret.') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-channel">{{ _('5 GHz Channel') }}</label>
+					<div class="cbi-value-field">
+						<select class="cbi-input-select" id="cbi-channel" name="channel">
+						{% for (ch in CHANNELS_5G): %}
+							<option value="{{ ch }}"{{ ch == cur_channel ? ' selected' : '' }}>{{ ch }}</option>
+						{% endfor %}
+						</select>
+						<div class="cbi-value-description">{{ _('Non-DFS channels are 36/40/44/48 and 149-165 — no radar-wait on bring-up.') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-htmode-5g">{{ _('5 GHz Channel Width') }}</label>
+					<div class="cbi-value-field">
+						<select class="cbi-input-select" id="cbi-htmode-5g" name="htmode_5g">
+						{% for (m in HTMODES_5G): %}
+							<option value="{{ m }}"{{ m == cur_htmode_5g ? ' selected' : '' }}>{{ m }}</option>
+						{% endfor %}
+						</select>
+						<div class="cbi-value-description">{{ _('HE20=20MHz, HE40=40MHz, HE80=80MHz, HE160=160MHz. Wider = more throughput but shorter range. HE20 or HE40 is recommended for outdoor MANET range; HE80 is the ath11k default and best for indoor / dense mesh. HE80 requires consecutive channels (ch 36 / 52 / 100 / 116 / 132 / 149 are valid primaries; 161 and 165 do not work at HE80).') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-encryption">{{ _('Encryption') }}</label>
+					<div class="cbi-value-field">
+						<select class="cbi-input-select" id="cbi-encryption" name="encryption">
+							<option value="none"{{ cur_encryption == 'none' ? ' selected' : '' }}>{{ _('None (open mesh)') }}</option>
+							<option value="sae"{{ cur_encryption == 'sae' ? ' selected' : '' }}>{{ _('SAE (WPA3)') }}</option>
+						</select>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-key">{{ _('Passphrase (if SAE)') }}</label>
+					<div class="cbi-value-field">
+						<input class="cbi-input-password" id="cbi-key" type="password" name="key" value="{{ cur_key }}" minlength="8" maxlength="63">
+						<div class="cbi-value-description">{{ _('8–63 characters. Must match on all peers.') }}</div>
+					</div>
+				</div>
+
+			</div>
+		</fieldset>
+
+		<fieldset class="cbi-section">
+			<legend>{{ _('Optional: 2.4 GHz mesh radio') }}</legend>
+			<div class="cbi-section-node">
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-mesh-2g">{{ _('Also bring up 2.4 GHz as mesh') }}</label>
+					<div class="cbi-value-field">
+						<input class="cbi-input-checkbox" id="cbi-mesh-2g" type="checkbox" name="mesh_2g_enable" value="1"{{ cur_mesh_2g_enable ? ' checked' : '' }}>
+						<div class="cbi-value-description">{{ _('Joins the same mesh (same ID + encryption as 5 GHz) on the channel below. batman-adv bridges traffic between bands, so peers on either band see each other. Slower than 5 GHz, longer range. The 2.4 GHz mgmt AP keeps working on the same channel.') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-channel-2g">{{ _('2.4 GHz Channel') }}</label>
+					<div class="cbi-value-field">
+						<select class="cbi-input-select" id="cbi-channel-2g" name="channel_2g">
+						{% for (ch in CHANNELS_2G): %}
+							<option value="{{ ch }}"{{ ch == cur_channel_2g ? ' selected' : '' }}>{{ ch }}</option>
+						{% endfor %}
+						</select>
+						<div class="cbi-value-description">{{ _('Channels 1, 6, and 11 are non-overlapping in most regions. The 2.4 GHz mgmt AP runs on this same channel.') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-htmode-2g">{{ _('2.4 GHz Channel Width') }}</label>
+					<div class="cbi-value-field">
+						<select class="cbi-input-select" id="cbi-htmode-2g" name="htmode_2g">
+						{% for (m in HTMODES_2G): %}
+							<option value="{{ m }}"{{ m == cur_htmode_2g ? ' selected' : '' }}>{{ m }}</option>
+						{% endfor %}
+						</select>
+						<div class="cbi-value-description">{{ _('HE20 is strongly recommended in 2.4 GHz; HE40 overlaps 5 of the 11 channels and is RF-hostile in any populated environment. Applies to mesh and mgmt-AP on this radio.') }}</div>
+					</div>
+				</div>
+
+			</div>
+		</fieldset>
+
+		<fieldset class="cbi-section">
+			<legend>{{ _('Bridge LAN over mesh (advanced)') }}</legend>
+			<div class="cbi-section-descr">
+				{{ _('Adds bat0 to the br-lan bridge. The wired LAN, mgmt-AP, and mesh become one L2 broadcast domain. A client connected to this router can talk directly to clients/printers/etc on other mesh nodes\' LAN ports. batman-adv\'s Bridge Loop Avoidance (BLA) prevents loops.') }}
+			</div>
+			<div class="cbi-section-node">
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-bridge-mesh">{{ _('Bridge LAN to mesh') }}</label>
+					<div class="cbi-value-field">
+						<input class="cbi-input-checkbox" id="cbi-bridge-mesh" type="checkbox" name="bridge_mesh" value="1"{{ cur_bridge_mesh ? ' checked' : '' }}>
+						<div class="cbi-value-description">{{ _('Off by default. When off, each node has an isolated 192.168.1.0/24 LAN and no client traffic crosses the mesh.') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-is-gateway">{{ _('This node is the gateway') }}</label>
+					<div class="cbi-value-field">
+						<input class="cbi-input-checkbox" id="cbi-is-gateway" type="checkbox" name="is_gateway" value="1"{{ cur_is_gateway ? ' checked' : '' }}>
+						<div class="cbi-value-description">{{ _('Check on EXACTLY ONE node in the mesh. The gateway runs dnsmasq and hands out DHCP leases for the bridged subnet. Other nodes (uncheck this box) inherit DHCP from the gateway over the mesh.') }}</div>
+					</div>
+				</div>
+
+			</div>
+		</fieldset>
+
+		<fieldset class="cbi-section">
+			<legend>{{ _('Mesh L3 (optional)') }}</legend>
+			<div class="cbi-section-node">
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-bat-ip">{{ _('Node IP on bat0') }}</label>
+					<div class="cbi-value-field">
+						<input class="cbi-input-text" id="cbi-bat-ip" type="text" name="bat_ip" value="{{ cur_bat_ip }}" placeholder="10.41.1.1">
+						<div class="cbi-value-description">{{ _('Leave blank for L2-only mesh. To carry traffic over the mesh without bridging into LAN, give every node a unique IP in the same /16 subnet (e.g. 10.41.1.1, 10.41.1.2, …).') }}</div>
+					</div>
+				</div>
+
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-bat-netmask">{{ _('Netmask') }}</label>
+					<div class="cbi-value-field">
+						<input class="cbi-input-text" id="cbi-bat-netmask" type="text" name="bat_netmask" value="{{ cur_bat_netmask }}" placeholder="255.255.0.0">
+						<div class="cbi-value-description">{{ _('Defaults to /16 (255.255.0.0) so up to ~65k mesh nodes fit.') }}</div>
+					</div>
+				</div>
+
+			</div>
+		</fieldset>
+
+		<fieldset class="cbi-section">
+			<legend>{{ _('Regulatory') }}</legend>
+			<div class="cbi-section-node">
+				<div class="cbi-value">
+					<label class="cbi-value-title" for="cbi-country">{{ _('Country Code') }}</label>
+					<div class="cbi-value-field">
+						<select class="cbi-input-select" id="cbi-country" name="country">
+						{% for (c in COUNTRIES): %}
+							<option value="{{ c[0] }}"{{ c[0] == cur_country ? ' selected' : '' }}>{{ c[1] }}</option>
+						{% endfor %}
+						</select>
+						<div class="cbi-value-description">{{ _('Applied to both radios. Required for full TX power and to unlock regional channels.') }}</div>
+					</div>
+				</div>
+			</div>
+		</fieldset>
+
+		<div class="cbi-page-actions">
+			<button class="cbi-button cbi-button-apply" type="submit">{{ _('Save & Apply') }}</button>
+		</div>
+	</form>
+</div>
+
+{% include('footer'); %}

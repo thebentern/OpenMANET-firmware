@@ -1,0 +1,13 @@
+{
+	"admin/mesh/tailscale": {
+		"title": "Tailscale",
+		"order": 40,
+		"action": {
+			"type": "template",
+			"path": "network/openmanet-tailscale"
+		},
+		"depends": {
+			"acl": [ "luci-app-openmanet-tailscale" ]
+		}
+	}
+}

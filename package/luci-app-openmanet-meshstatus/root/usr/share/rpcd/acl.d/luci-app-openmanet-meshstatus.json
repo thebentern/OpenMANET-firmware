@@ -1,0 +1,20 @@
+{
+	"luci-app-openmanet-meshstatus": {
+		"description": "Grant read-only access to the AXT-1800 mesh status dashboard",
+		"read": {
+			"file": {
+				"/usr/sbin/batctl meshif bat0 originators": [ "exec" ],
+				"/usr/sbin/batctl meshif bat0 statistics": [ "exec" ],
+				"/usr/sbin/batctl meshif bat0 gw_mode": [ "exec" ],
+				"/usr/sbin/batctl meshif bat0 gateways": [ "exec" ],
+				"/usr/sbin/iw dev phy0-mesh0 info": [ "exec" ],
+				"/usr/sbin/iw dev phy0-mesh0 station dump": [ "exec" ],
+				"/bin/pidof *": [ "exec" ],
+				"/sbin/logread": [ "exec" ],
+				"/etc/bat-hosts": [ "read" ],
+				"/sys/class/net/bat0/statistics/*": [ "read" ],
+				"/sys/class/net/phy0-mesh0/statistics/*": [ "read" ]
+			}
+		}
+	}
+}

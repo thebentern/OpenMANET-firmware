@@ -1,0 +1,13 @@
+{
+	"admin/mesh/cot": {
+		"title": "ATAK / CoT",
+		"order": 25,
+		"action": {
+			"type": "template",
+			"path": "network/openmanet-cot"
+		},
+		"depends": {
+			"acl": [ "luci-app-openmanet-cot" ]
+		}
+	}
+}

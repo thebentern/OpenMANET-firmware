@@ -1,0 +1,322 @@
+{%
+//
+// AXT-1800 ATAK / CoT / multicast status page, server-side rendered.
+//
+// Read-only view of the mesh's multicast posture. Headline question:
+// "Is CoT/multicast actually flowing across the mesh?" — answered with the
+// per-interface counters, the per-interface joined groups, and the
+// batman-adv multicast_mode setting that governs how mcast is forwarded.
+//
+// Data sources:
+//   - UCI: network.bat0.multicast_mode
+//   - /proc/net/igmp (kernel's multicast join list; per-interface)
+//   - /sys/class/net/<iface>/statistics/multicast (RX packet counters)
+//
+// BusyBox `ip` does NOT support `ip maddr` on this image (probed), so
+// /proc/net/igmp is the only kernel-side join-list source we use.
+//
+
+import { cursor } from 'uci';
+import { popen, readfile, lsdir } from 'fs';
+
+const uci = cursor();
+
+// --- helpers ---------------------------------------------------------------
+
+function slurp(cmd) {
+	let fp = popen(cmd, 'r');
+	if (!fp) return '';
+	let out = fp.read('all') || '';
+	fp.close();
+	return trim(out);
+}
+
+// Convert the little-endian hex IPv4 address in /proc/net/igmp into the
+// usual dotted-decimal form. "FB0000E0" → bytes [FB, 00, 00, E0] →
+// network-byte-order reverse → E0.00.00.FB → 224.0.0.251.
+function hex_to_ipv4(h) {
+	if (length(h) != 8) return h;
+	let b3 = hex(substr(h, 0, 2));
+	let b2 = hex(substr(h, 2, 2));
+	let b1 = hex(substr(h, 4, 2));
+	let b0 = hex(substr(h, 6, 2));
+	return sprintf('%d.%d.%d.%d', b0, b1, b2, b3);
+}
+
+// Map well-known multicast groups to their operator-recognisable name.
+// Source: IANA assignments + ATAK / TAK Civilian project defaults.
+const WELL_KNOWN = {
+	'224.0.0.1':       'IPv4 all-hosts',
+	'224.0.0.22':      'IGMPv3 reports',
+	'224.0.0.251':     'mDNS (.local)',
+	'224.0.0.252':     'LLMNR',
+	'239.2.3.1':       'ATAK CoT default',
+	'239.5.5.55':      'TAK Civ',
+	'239.255.255.250': 'SSDP / UPnP'
+};
+
+// Parse /proc/net/igmp. Header line per interface, then indented group
+// lines. Example:
+//   6	br-lan    :     2      V3
+//   				FB0000E0     1 0:00000000		0
+function parse_igmp() {
+	let raw = readfile('/proc/net/igmp');
+	if (!raw) return [];
+	let by_iface = [];
+	let cur = null;
+	for (let line in split(raw, '\n')) {
+		if (length(line) == 0) continue;
+		// Interface header: starts with a digit (idx), then iface name
+		let hm = match(line, /^\d+\s+(\S+)\s*:/);
+		if (hm) {
+			if (cur) push(by_iface, cur);
+			cur = { iface: hm[1], groups: [] };
+			continue;
+		}
+		// Group line: pure indentation, then hex IP, then count
+		let gm = match(line, /^\s+([0-9A-Fa-f]{8})\s+(\d+)/);
+		if (gm && cur) {
+			let ip = hex_to_ipv4(gm[1]);
+			push(cur.groups, {
+				ip:    ip,
+				users: gm[2],
+				name:  WELL_KNOWN[ip] || ''
+			});
+		}
+	}
+	if (cur) push(by_iface, cur);
+	return by_iface;
+}
+
+// Read the multicast counter for an interface. Returns "0" if missing.
+function mc_count(iface) {
+	let v = readfile('/sys/class/net/' + iface + '/statistics/multicast');
+	return v ? trim(v) : '0';
+}
+
+function format_number(n) {
+	if (!n) return '0';
+	n = '' + n;  // ensure string
+	// Insert commas every 3 chars from the right
+	let out = '';
+	let len = length(n);
+	for (let i = 0; i < len; i++) {
+		if (i > 0 && (len - i) % 3 == 0) out += ',';
+		out += substr(n, i, 1);
+	}
+	return out;
+}
+
+// Auto-detect the 802.11s mesh radio interface. AXT-1800 (ath11k) names it
+// phy0-mesh0; MT3000 (mt76) may differ. `iw dev` is the kernel's
+// authoritative view; sysfs scan is a fallback for the edge case where
+// iw is missing or the radio is mid-restart.
+function detect_mesh_iface() {
+	let raw = slurp('iw dev 2>/dev/null');
+	let cur = null;
+	for (let line in split(raw, '\n')) {
+		let m = match(line, /^\s*Interface\s+(\S+)/);
+		if (m) { cur = m[1]; continue; }
+		if (cur && match(line, /type\s+mesh\s+point/)) return cur;
+	}
+	let entries = lsdir('/sys/class/net') || [];
+	for (let e in entries) {
+		if (index(e, 'mesh') >= 0) return e;
+	}
+	return 'phy0-mesh0';
+}
+
+// --- gather state ----------------------------------------------------------
+const mc_mode_raw = uci.get('network', 'bat0', 'multicast_mode');
+const mc_mode     = (mc_mode_raw != null && mc_mode_raw != '') ? mc_mode_raw : '0';
+
+const igmp        = parse_igmp();
+const MESH_IF     = detect_mesh_iface();
+const cot_ifaces  = [ 'bat0', 'br-lan', MESH_IF, 'wan' ];
+const counters    = {};
+for (let i in cot_ifaces) counters[i] = mc_count(i);
+
+const smcroute_avail = slurp('which smcroute') != '';
+
+// Helpful posture label
+function posture_label(m) {
+	if (m == '0' || m == '') return [ 'safe', _('Flood as broadcast — CoT-safe') ];
+	if (m == '1')            return [ 'risky', _('IGMP-aware — CoT can drop for nodes that haven\'t joined') ];
+	return [ 'risky', _('Non-default — check carefully') ];
+}
+const posture = posture_label(mc_mode);
+
+include('header');
+%}
+
+<style>
+	.cot-card      { background:#1c1c1c; border-radius:8px; padding:14px; margin-bottom:1em; }
+	.cot-grid      { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:13px; }
+	.cot-grid dt   { color:#bbb; }
+	.cot-grid dd   { color:#fff; font-family:Menlo,Consolas,monospace; font-size:12.5px; margin:0; }
+	.cot-pill      { display:inline-block; padding:2px 10px; border-radius:11px; font-size:11px;
+	                  font-weight:600; letter-spacing:0.5px; }
+	.cot-pill-safe { background:#2d6a4f; color:#fff; }
+	.cot-pill-risky{ background:#bf6900; color:#fff; }
+	.cot-tbl       { width:100%; }
+	.cot-tbl th    { text-align:left; padding:6px 8px; background:#222; color:#bbb; font-size:11.5px;
+	                  font-weight:600; letter-spacing:0.5px; }
+	.cot-tbl td    { padding:6px 8px; font-family:Menlo,Consolas,monospace; font-size:12px; }
+	.cot-tbl tr+tr td { border-top:1px solid #2a2a2a; }
+	.cot-group-known { color:#7cd07c; }
+	.cot-empty     { color:#888; font-style:italic; padding:14px; text-align:center; }
+	.cot-counter   { font-family:Menlo,Consolas,monospace; font-size:18px; color:#fff; }
+	.cot-counter-label { color:#bbb; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; }
+	.cot-counters  { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; }
+	.cot-counter-card { background:#222; padding:12px; border-radius:6px; text-align:center; }
+	.cot-warn      { background:#3a2a00; color:#ffc; padding:10px; border-radius:6px; font-size:12.5px;
+	                  margin-top:10px; }
+</style>
+
+<div class="cbi-map">
+	<h2 name="content">{{ _('ATAK / CoT multicast') }}</h2>
+	<div class="cbi-map-descr">
+		{{ _('How is the mesh handling multicast — the layer ATAK CoT, mDNS, and SSDP all ride on? This page is read-only; everything shown here is governed by the wizard\'s batman-adv config + the kernel\'s join state. If CoT seems missing, start by checking the per-interface group joins below.') }}
+		<form method="GET" action="" style="display:inline-block;margin-left:1em;">
+			<button type="submit" class="cbi-button">{{ _('Refresh') }}</button>
+		</form>
+	</div>
+
+	<!-- ============================================================ -->
+	<!-- Section 1: Mesh multicast posture                              -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('Mesh multicast posture') }}</legend>
+		<div class="cot-card">
+			<dl class="cot-grid">
+				<dt>{{ _('batman-adv multicast_mode') }}</dt>
+				<dd>
+					<code>{{ mc_mode }}</code>
+					<span class="cot-pill {{ posture[0] == 'safe' ? 'cot-pill-safe' : 'cot-pill-risky' }}">{{ posture[1] }}</span>
+				</dd>
+				<dt>{{ _('Meaning') }}</dt>
+				<dd style="font-family:inherit;color:#ddd;">
+					{% if (mc_mode == '0' || mc_mode == ''): %}
+						{{ _('Every multicast packet is flooded across the mesh as broadcast. Every peer hears every CoT packet without having to join the group. Safe default for ATAK; works without IGMP querier on the mesh.') }}
+					{% endif %}
+					{% if (mc_mode == '1'): %}
+						{{ _('batman-adv tries to route multicast only to peers that joined the group. Faster on big meshes, but if a CoT receiver hasn\'t joined yet (ATAK Civ does join 239.2.3.1, but some setups drift), traffic gets dropped at the mesh edge.') }}
+					{% endif %}
+				</dd>
+			</dl>
+			{% if (mc_mode != '0' && mc_mode != ''): %}
+				<div class="cot-warn">
+					⚠ {{ _('multicast_mode is non-default. If CoT receivers drop in/out of the network, this is the first thing to check. Set it back to 0 in /etc/config/network (network.bat0.multicast_mode=\'0\') and reload network.') }}
+				</div>
+			{% endif %}
+		</div>
+	</fieldset>
+
+	<!-- ============================================================ -->
+	<!-- Section 2: Per-interface multicast traffic counters             -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('Multicast packets received (since boot)') }}</legend>
+		<div class="cbi-section-descr">
+			{{ _('Per-interface receive counters from /sys/class/net/*/statistics/multicast. If bat0 is incrementing but br-lan isn\'t, multicast isn\'t bridging to the wired LAN. If wan is incrementing, your upstream is leaking multicast (usually harmless).') }}
+		</div>
+		<div class="cbi-section-node">
+			<div class="cot-counters">
+			{% for (iface in cot_ifaces): %}
+				<div class="cot-counter-card">
+					<div class="cot-counter">{{ format_number(counters[iface]) }}</div>
+					<div class="cot-counter-label">{{ iface }}</div>
+				</div>
+			{% endfor %}
+			</div>
+		</div>
+	</fieldset>
+
+	<!-- ============================================================ -->
+	<!-- Section 3: Joined multicast groups (per interface)              -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('Joined multicast groups') }}</legend>
+		<div class="cbi-section-descr">
+			{{ _('Every group the kernel has been told to listen for, per interface. Read from /proc/net/igmp. "Users" is the number of local sockets wanting that group. Recognised CoT / ATAK / mDNS groups are highlighted.') }}
+		</div>
+		<div class="cbi-section-node">
+			{% if (length(igmp) == 0): %}
+				<div class="cot-empty">{{ _('No interfaces with multicast joins. Either the kernel has no multicast-listening sockets, or /proc/net/igmp is not readable.') }}</div>
+			{% endif %}
+			{% if (length(igmp) > 0): %}
+				<table class="cot-tbl">
+					<thead>
+						<tr>
+							<th>{{ _('Interface') }}</th>
+							<th>{{ _('Group') }}</th>
+							<th>{{ _('Well-known name') }}</th>
+							<th>{{ _('Joiners') }}</th>
+						</tr>
+					</thead>
+					<tbody>
+					{% for (i in igmp): %}
+						{% if (length(i.groups) == 0): %}
+							<tr>
+								<td>{{ i.iface }}</td>
+								<td colspan="3" style="color:#888;font-style:italic;">{{ _('(no joins)') }}</td>
+							</tr>
+						{% endif %}
+						{% for (g in i.groups): %}
+							<tr>
+								<td>{{ i.iface }}</td>
+								<td>{{ g.ip }}</td>
+								<td class="{{ g.name ? 'cot-group-known' : '' }}">{{ g.name || '—' }}</td>
+								<td>{{ g.users }}</td>
+							</tr>
+						{% endfor %}
+					{% endfor %}
+					</tbody>
+				</table>
+			{% endif %}
+		</div>
+	</fieldset>
+
+	<!-- ============================================================ -->
+	<!-- Section 4: ATAK quick-reference (informational)                -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('ATAK / TAK quick reference') }}</legend>
+		<div class="cot-card">
+			<dl class="cot-grid">
+				<dt>{{ _('CoT mcast group') }}</dt>      <dd>239.2.3.1</dd>
+				<dt>{{ _('CoT mcast port (UDP)') }}</dt> <dd>6969</dd>
+				<dt>{{ _('CoT discovery (SA)') }}</dt>   <dd>239.2.3.1:17012 <span style="color:#888;">(situational awareness)</span></dd>
+				<dt>{{ _('TLS TAK Server') }}</dt>       <dd>{{ _('No mesh default — operator-configured, typically on a Tailnet IP') }}</dd>
+				<dt>{{ _('Recommended pattern') }}</dt>  <dd style="font-family:inherit;color:#ddd;">
+					{{ _('Run TAK Server on the command-center node, reach it from field clients via Tailscale tunnel. CoT multicast still works for nearby SA between peers on the same 802.11s mesh.') }}
+				</dd>
+			</dl>
+			<div style="margin-top:10px;font-size:12px;color:#aaa;">
+				{{ _('CoT/TAK references:') }}
+				<a href="https://wiki.tak.gov/atak-civ/" target="_blank" style="color:#7cd07c;">tak.gov/atak-civ</a>
+				·
+				<a href="https://github.com/FreeTAKTeam/FreeTakServer" target="_blank" style="color:#7cd07c;">FreeTAKServer</a>
+			</div>
+		</div>
+	</fieldset>
+
+	<!-- ============================================================ -->
+	<!-- Section 5: Advanced — smcroute hint                            -->
+	<!-- ============================================================ -->
+	<fieldset class="cbi-section">
+		<legend>{{ _('Advanced: cross-segment multicast routing') }}</legend>
+		<div class="cot-card">
+			{% if (smcroute_avail): %}
+				<p>{{ _('smcroute is installed. Edit /etc/smcroute.conf to forward specific groups between interfaces (e.g., wan → bat0 to bridge CoT from a TAK Server upstream into the mesh).') }}</p>
+			{% endif %}
+			{% if (!smcroute_avail): %}
+				<p>{{ _('smcroute is NOT installed. For most operators this is fine — batman-adv flooding (multicast_mode=0) is the simpler and more reliable path. If you need to forward specific groups across the WAN ↔ mesh boundary, install smcroute via SSH:') }}</p>
+				<pre style="background:#0f0f0f;padding:10px;border-radius:6px;color:#ddd;">apk add smcroute</pre>
+			{% endif %}
+		</div>
+	</fieldset>
+
+</div>
+
+{% include('footer'); %}

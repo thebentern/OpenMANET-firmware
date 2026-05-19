@@ -1,0 +1,13 @@
+{
+	"admin/mesh/meshtasticd": {
+		"title": "meshtasticd",
+		"order": 30,
+		"action": {
+			"type": "template",
+			"path": "network/openmanet-meshtasticd"
+		},
+		"depends": {
+			"acl": [ "luci-app-openmanet-meshtasticd" ]
+		}
+	}
+}

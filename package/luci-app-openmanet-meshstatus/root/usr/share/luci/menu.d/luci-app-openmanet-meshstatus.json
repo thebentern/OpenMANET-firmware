@@ -1,0 +1,13 @@
+{
+	"admin/mesh/status": {
+		"title": "Status",
+		"order": 5,
+		"action": {
+			"type": "template",
+			"path": "network/openmanet-meshstatus"
+		},
+		"depends": {
+			"acl": [ "luci-app-openmanet-meshstatus" ]
+		}
+	}
+}

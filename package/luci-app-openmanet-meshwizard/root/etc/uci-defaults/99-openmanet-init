@@ -1,0 +1,113 @@
+#!/bin/sh
+#
+# /etc/uci-defaults/99-openmanet-init
+#
+# Runs once on first boot after install (or post-apk-install). When it
+# exits 0, OpenWrt's uci-defaults runner deletes it, so this is the
+# canonical place for one-shot setup that must NOT re-run on later
+# boots.
+#
+# Two jobs, both safe to skip silently if the relevant pieces aren't
+# installed (defensive, in case the package install order varies):
+#
+# 1) Disable openmanetd's destructive "address reservation" worker by
+#    flipping its "already configured" UCI flags to '1'. That worker
+#    would otherwise — about 5 minutes after openmanetd starts —
+#    allocate a 10.41.x.x IP for this node from the mesh pool, REWRITE
+#    network.lan, and DROP dhcp.lan. We want the wired LAN to stay at
+#    192.168.1.1/24 for management.
+#
+# 2) Stand up a 2.4 GHz management AP on the 2.4 GHz radio. Stock
+#    OpenWrt 25.12 ships both radios with disabled=1, no SSID worth
+#    using. We add `openmanet-mgmt` (WPA3-SAE) so the operator always
+#    has a wireless way in even if the wired side ever gets messed up.
+#
+# Idempotent. Run-time check `uci -q get` everywhere so a missing piece
+# is a no-op rather than an error. Exits 0 unconditionally so the
+# uci-defaults runner cleans this script up.
+#
+
+# --- 0. LuCI theme: switch to OpenMANET argon if it's installed -------
+# The argon theme ships with the all-in-one image build. If it's not
+# present (e.g. apk-install on stock 25.12.4 without the theme), we
+# silently leave luci.main.mediaurlbase at its default — pointing it
+# at a missing theme would 500 LuCI on every page load.
+if [ -d /www/luci-static/openmanetargon ]; then
+	uci -q set luci.main.mediaurlbase='/luci-static/openmanetargon'
+	uci -q commit luci
+fi
+
+# --- 1. Pin openmanetd's address-reservation worker off ----------------
+if [ -f /etc/config/openmanetd ]; then
+	uci set openmanetd.config.dhcpconfigured=1
+	uci set openmanetd.config.roipconfigured=1
+	uci set openmanetd.config.batmesh1configured=1
+	uci commit openmanetd
+	# Restart openmanetd if it's already running so the worker reads
+	# the new flags before its first tick.
+	[ -x /etc/init.d/openmanetd ] && /etc/init.d/openmanetd restart >/dev/null 2>&1
+fi
+
+# --- 2. Stand up the 2.4 GHz management AP -----------------------------
+# Detect the 2.4 GHz radio dynamically — don't hardcode "radio1", it
+# could differ across board variants.
+radio_2g=
+for r in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-device$/ {print $2}'); do
+	band=$(uci -q get wireless.$r.band)
+	[ "$band" = "2g" ] && { radio_2g=$r; break; }
+done
+
+# Fall back to channel-based detection if `band` isn't set yet.
+if [ -z "$radio_2g" ]; then
+	for r in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-device$/ {print $2}'); do
+		ch=$(uci -q get wireless.$r.channel)
+		case "$ch" in
+			1|2|3|4|5|6|7|8|9|10|11|12|13|14|auto)
+				radio_2g=$r; break ;;
+		esac
+	done
+fi
+
+if [ -n "$radio_2g" ]; then
+	uci set wireless.$radio_2g.disabled=0
+	uci set wireless.$radio_2g.channel=6
+	uci set wireless.$radio_2g.country=US
+
+	# Add the mgmt-AP wifi-iface if not already present.
+	if ! uci -q get wireless.mgmt_ap >/dev/null; then
+		uci set wireless.mgmt_ap=wifi-iface
+	fi
+	uci set wireless.mgmt_ap.device=$radio_2g
+	uci set wireless.mgmt_ap.network=lan
+	uci set wireless.mgmt_ap.mode=ap
+	uci set wireless.mgmt_ap.disabled=0
+	uci set wireless.mgmt_ap.ssid=openmanet-mgmt
+	uci set wireless.mgmt_ap.encryption=sae
+	uci set wireless.mgmt_ap.key=openmanet-mgmt-please-change
+	uci set wireless.mgmt_ap.ieee80211w=2
+
+	# Disable any stock placeholder AP on this radio so its SSID doesn't
+	# clutter the airwaves.
+	for s in $(uci show wireless 2>/dev/null | awk -F'[.=]' '/=wifi-iface$/ {print $2}'); do
+		[ "$s" = "mgmt_ap" ] && continue
+		dev=$(uci -q get wireless.$s.device)
+		mode=$(uci -q get wireless.$s.mode)
+		if [ "$dev" = "$radio_2g" ] && [ "$mode" = "ap" ]; then
+			uci set wireless.$s.disabled=1
+		fi
+	done
+
+	uci commit wireless
+
+	# Reload wifi only if procd is alive — on factory boot, wifi will
+	# come up on its own from /etc/config/wireless. On apk post-install,
+	# we kick a reload so the operator sees the AP immediately.
+	if pidof procd >/dev/null 2>&1; then
+		wifi reload >/dev/null 2>&1 || true
+	fi
+fi
+
+# Always succeed so uci-defaults cleans the script away. Anything we
+# couldn't do this run will be picked up by axt-postinstall.sh from
+# the Mac if the operator runs it.
+exit 0
